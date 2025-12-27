@@ -45,3 +45,57 @@ The dataset metadata explicitly flags `human_question` vs `human_answer`.
 * **Size:** ~17,700 QA pairs.
 * **Coverage:** Maps to the entire MITRE ATT&CK Enterprise Matrix.
 * **Reasoning:** Unlike simple FAQ datasets, many records include a `thought` field, allowing you to train models to *reason* about security ("To answer this, I first need to check X...") rather than just memorizing facts.
+
+### Data format & files
+- Source file: `data/attackqa/attackqa.parquet` (local parquet).
+- Columns: `question`, `thought`, `answer`, `document`, `subject_id`, `subject_name`, `subject_type`, `url`, `source`, `references`, `human_question`, `human_answer`, `field`, `relation_id`, `relation_name`.
+
+### Size & scope
+- Total QA pairs: **25,335**.
+- Coverage: MITRE ATT&CK Enterprise techniques (e.g., `subject_id` like `T1539`).
+- Labels: `human_question` / `human_answer` booleans flag human-authored vs. synthetic.
+
+### Availability & license
+- Local: `data/attackqa/attackqa.parquet` (already loaded by the notebook).
+- Upstream: `sambanovasystems/attackqa` on Hugging Face.
+- License: Apache-2.0; underlying MITRE ATT&CK content © 2025 MITRE (per dataset card).
+
+### Integration with this project
+- Ingested in [notebooks/notebook.py](notebooks/notebook.py) (AttackQA cell loads parquet into SQLite).
+- Table: `attack_qa`
+  - `unique_id` (TEXT, PK) — `attackqa_{tech_id}_{row_index}`
+  - `mitre_technique_id` (TEXT)
+  - `question` (TEXT)
+  - `thought_trace` (TEXT) — reasoning steps
+  - `answer` (TEXT)
+  - `context_document` (TEXT) — retrieval snippet
+  - `is_human_question` (BOOLEAN)
+  - `is_human_answer` (BOOLEAN)
+  - `source_relation` (TEXT) — e.g., `relationships_detects`
+  - `full_json` (TEXT)
+  - `source` (TEXT, default `attack_qa`)
+
+#### Query examples
+```python
+from notebooks.notebook import get_db_connection
+import pandas as pd
+
+conn = get_db_connection()
+
+# Pull questions for a specific MITRE technique
+pd.read_sql_query(
+    "SELECT question, answer, thought_trace FROM attack_qa WHERE mitre_technique_id = 'T1539' LIMIT 5",
+    conn,
+)
+
+# Human-authored QA pairs only
+pd.read_sql_query(
+    "SELECT mitre_technique_id, question FROM attack_qa "
+    "WHERE is_human_question = 1 AND is_human_answer = 1 LIMIT 5",
+    conn,
+)
+```
+
+### Strengths & limitations
+- Strengths: Large coverage of MITRE techniques; paired context documents for RAG; thought traces enable reasoning supervision; human/synthetic flags for filtering.
+- Limitations: Pure QA (no tool-use traces); English-only; MITRE licensing applies to underlying content.

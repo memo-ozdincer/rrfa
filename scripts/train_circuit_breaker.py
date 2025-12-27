@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""
+Circuit Breakers Training Script
+
+Train a model with Representation Rerouting (RR) to refuse harmful requests
+while preserving benign capabilities.
+
+Usage:
+    # Default: Llama-4-Scout-17B-16E-Instruct
+    python scripts/train_circuit_breaker.py
+
+    # With preset
+    python scripts/train_circuit_breaker.py --preset llama-3-8b
+
+    # With overrides
+    python scripts/train_circuit_breaker.py --alpha-max 8.0 --total-steps 200
+
+    # Multi-GPU with accelerate
+    accelerate launch --num_processes 8 scripts/train_circuit_breaker.py
+
+Examples:
+    # Quick test run
+    python scripts/train_circuit_breaker.py --total-steps 10 --no-wandb
+
+    # Full training on 8 x H100
+    accelerate launch --num_processes 8 scripts/train_circuit_breaker.py \\
+        --preset llama-4-scout \\
+        --output-dir outputs/cb_llama4_scout \\
+        --wandb-run-name cb-scout-v1
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from scripts.circuit_breakers.config import get_config, CONFIG_PRESETS
+from scripts.circuit_breakers.trainer import CircuitBreakerTrainer
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Train Circuit Breakers (Representation Rerouting)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    
+    # Preset selection
+    parser.add_argument(
+        "--preset",
+        type=str,
+        default="llama-4-scout",
+        choices=list(CONFIG_PRESETS.keys()),
+        help="Configuration preset to use",
+    )
+    
+    # Model overrides
+    parser.add_argument(
+        "--base-model",
+        type=str,
+        default=None,
+        help="Override base model path/name",
+    )
+    
+    # Training hyperparameters
+    parser.add_argument(
+        "--alpha-max",
+        type=float,
+        default=None,
+        help="Maximum alpha for rerouting loss (default: from preset)",
+    )
+    parser.add_argument(
+        "--total-steps",
+        type=int,
+        default=None,
+        help="Total training steps (default: from preset)",
+    )
+    parser.add_argument(
+        "--learning-rate",
+        type=float,
+        default=None,
+        help="Learning rate (default: from preset)",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Per-GPU batch size (default: from preset)",
+    )
+    parser.add_argument(
+        "--gradient-accumulation-steps",
+        type=int,
+        default=None,
+        help="Gradient accumulation steps",
+    )
+    
+    # Data
+    parser.add_argument(
+        "--data-path",
+        type=str,
+        default=None,
+        help="Path to cb_training_batches.jsonl",
+    )
+    parser.add_argument(
+        "--max-seq-length",
+        type=int,
+        default=None,
+        help="Maximum sequence length for tokenization",
+    )
+    
+    # Output
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Output directory for checkpoints",
+    )
+    
+    # Logging
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default=None,
+        help="Weights & Biases project name",
+    )
+    parser.add_argument(
+        "--wandb-run-name",
+        type=str,
+        default=None,
+        help="Weights & Biases run name",
+    )
+    parser.add_argument(
+        "--no-wandb",
+        action="store_true",
+        help="Disable Weights & Biases logging",
+    )
+    
+    # Advanced
+    parser.add_argument(
+        "--cb-target-layers",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Layers to extract representations from (e.g., --cb-target-layers 12 24 36)",
+    )
+    parser.add_argument(
+        "--no-gradient-checkpointing",
+        action="store_true",
+        help="Disable gradient checkpointing",
+    )
+
+    parser.add_argument(
+        "--representation-extraction",
+        type=str,
+        default=None,
+        choices=["hidden_states", "hooks"],
+        help="How to extract representations: 'hidden_states' (preferred) or 'hooks'",
+    )
+
+    parser.add_argument(
+        "--alpha-decay-multiplier",
+        type=float,
+        default=None,
+        help="Alpha decays to 0 over (multiplier * total_steps). Set 1.0 to hit 0 by end.",
+    )
+    parser.add_argument(
+        "--lora-r",
+        type=int,
+        default=None,
+        help="LoRA rank",
+    )
+    parser.add_argument(
+        "--lora-alpha",
+        type=int,
+        default=None,
+        help="LoRA alpha",
+    )
+    
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    
+    # Build config overrides from CLI args
+    overrides = {}
+    
+    if args.base_model:
+        overrides['base_model'] = args.base_model
+    if args.alpha_max is not None:
+        overrides['alpha_max'] = args.alpha_max
+    if args.total_steps is not None:
+        overrides['total_steps'] = args.total_steps
+    if args.learning_rate is not None:
+        overrides['learning_rate'] = args.learning_rate
+    if args.batch_size is not None:
+        overrides['batch_size'] = args.batch_size
+    if args.gradient_accumulation_steps is not None:
+        overrides['gradient_accumulation_steps'] = args.gradient_accumulation_steps
+    if args.data_path:
+        overrides['data_path'] = args.data_path
+    if args.max_seq_length is not None:
+        overrides['max_seq_length'] = args.max_seq_length
+    if args.output_dir:
+        overrides['output_dir'] = args.output_dir
+    if args.wandb_project:
+        overrides['wandb_project'] = args.wandb_project
+    if args.wandb_run_name:
+        overrides['wandb_run_name'] = args.wandb_run_name
+    if args.no_wandb:
+        overrides['use_wandb'] = False
+    if args.cb_target_layers:
+        overrides['cb_target_layers'] = args.cb_target_layers
+    if args.no_gradient_checkpointing:
+        overrides['gradient_checkpointing'] = False
+    if args.representation_extraction:
+        overrides['representation_extraction'] = args.representation_extraction
+    if args.alpha_decay_multiplier is not None:
+        overrides['alpha_decay_multiplier'] = args.alpha_decay_multiplier
+    
+    # Get config with preset and overrides
+    config = get_config(args.preset, **overrides)
+    
+    # Handle LoRA overrides (nested config)
+    if args.lora_r is not None:
+        config.lora.r = args.lora_r
+    if args.lora_alpha is not None:
+        config.lora.alpha = args.lora_alpha
+    
+    # Print configuration
+    print("=" * 60)
+    print("Circuit Breaker Training Configuration")
+    print("=" * 60)
+    print(f"  Preset: {args.preset}")
+    print(f"  Base Model: {config.base_model}")
+    print(f"  Alpha Max: {config.alpha_max}")
+    print(f"  Alpha Decay Multiplier: {config.alpha_decay_multiplier}")
+    print(f"  Total Steps: {config.total_steps}")
+    print(f"  Learning Rate: {config.learning_rate}")
+    print(f"  Batch Size: {config.batch_size}")
+    print(f"  Gradient Accumulation: {config.gradient_accumulation_steps}")
+    print(f"  CB Target Layers: {config.cb_target_layers}")
+    print(f"  Representation Extraction: {config.representation_extraction}")
+    print(f"  LoRA Rank: {config.lora.r}")
+    print(f"  LoRA Alpha: {config.lora.alpha}")
+    print(f"  Data Path: {config.data_path}")
+    print(f"  Output Dir: {config.output_dir}")
+    print(f"  WandB: {config.use_wandb}")
+    print("=" * 60)
+    
+    # Create trainer and run
+    trainer = CircuitBreakerTrainer(config)
+    
+    try:
+        trainer.train()
+    except KeyboardInterrupt:
+        print("\n⚠️ Training interrupted by user")
+        trainer.save_checkpoint()
+    finally:
+        trainer.cleanup()
+    
+    print("\n✅ Done!")
+
+
+if __name__ == "__main__":
+    main()

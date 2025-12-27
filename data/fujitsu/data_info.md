@@ -63,3 +63,104 @@ When you run the ingestion code I provided earlier, these distinct behaviors (B1
 * **Target:** `simulated_tool` or `target_llm_output` (The system's failure state)
 
 This allows you to train a classifier to detect *intent* regardless of whether the attack is hidden in an image, a text document, or a direct user command.
+
+---
+
+### Data Format & Files
+
+**Four JSONL files** mapped to the B1–B4 attack surfaces:
+
+1) **orchestrator_attacks_combined_deduplicated.jsonl** (B4) — 13,246 records
+  - Fields: attack_id, category, subtype, benign_query, malicious_injection, combined_query, expected_tool, simulated_tool, success, judge_note, models_used, script_version, record_id, timestamp.
+
+2) **rag_poisoning_benchmark_combined_deduplicated.jsonl** (B1) — 10,943 records
+  - Fields: id, adversarial_goal, attack_category, attack_mechanism, attack_subtype, poison_content, benign_content, user_query, target_rag_component, target_component_model, target_model_system_prompt, target_llm_output, judge_assessment, metadata.
+
+3) **safety_benchmark_direct_query_combined_deduplicated.jsonl** (B3) — 10,003 records
+  - Same core fields as B1 plus strategy metadata: role_play, manipulation_strategy, communication_style, query_structure, intent_Opacity, Obfuscation, adversarial_suffix, payload_splitting, encoding.
+
+4) **image_poisoning_simulation_results_20250504_202954.jsonl** (B2) — 2,000 records + 3,995 PNG artifacts
+  - Fields: image_type, attack_id, user_query, adversarial_goal, attack_subtype, poison_payload, baseline_output, baseline_judge_assessment, baseline_rag_success, baseline_failure_stage, mta_output, mta_judge_assessment, mta_rag_success, mta_failure_stage.
+
+### Size & Scope
+
+- Total: **36,192** successful attack records
+  - B1: 10,943
+  - B2: 2,000 (plus 3,995 images/JSON descriptors)
+  - B3: 10,003
+  - B4: 13,246
+- Attack families: prompt injection, sensitive info disclosure, data/supply-chain poison, output handling, system prompt leak, misinformation, DoS, tool abuse.
+- Models: evaluated against GPT-4–class systems.
+- License: CC BY 4.0.
+
+### Availability
+
+- Online: Fujitsu/agentic-rag-redteam-bench on Hugging Face (see dataset card; DOI: 10.57967/hf/6395).
+- Local: data/fujitsu/ (JSONL + image artifacts).
+
+### Integration with This Project
+
+Ingestion lives in notebooks/notebook.py (Cell 9). SQLite table: `fujitsu_red_teaming`.
+
+```sql
+CREATE TABLE fujitsu_red_teaming (
+   unique_id TEXT PRIMARY KEY,          -- fujitsu_{subset}_{orig_id}
+   dataset_subset TEXT,                 -- orchestrator|text_poison|image_poison|direct_query
+   adversarial_goal TEXT,
+   attack_subtype TEXT,
+   combined_prompt TEXT,                -- weaponized input
+   expected_behavior TEXT,
+   actual_behavior TEXT,
+   success BOOLEAN,
+   judge_assessment TEXT,
+   source TEXT DEFAULT 'fujitsu'
+);
+```
+
+Query helpers (already defined):
+```python
+from notebooks.notebook import query_fujitsu, get_db_connection
+import pandas as pd
+
+# Orchestrator (tool-flip) examples
+df = query_fujitsu(subset='orchestrator', limit=5)
+
+# Successful text-poison attacks
+conn = get_db_connection()
+text_poison = pd.read_sql_query(
+   "SELECT * FROM fujitsu_red_teaming WHERE dataset_subset='text_poison' AND success=1",
+   conn,
+)
+
+# Specific subtype search
+hidden_json = pd.read_sql_query(
+   "SELECT * FROM fujitsu_red_teaming WHERE attack_subtype LIKE '%Hidden-JSON%'",
+   conn,
+)
+```
+
+### What It Has vs Doesn’t Have
+
+- Has: confirmed successful attacks only; multimodal vectors; component-targeted failures; rich strategy metadata; judge assessments.
+- Lacks: benign baselines; multi-turn trajectories; non-English attacks; real-user logs (all synthetic prompts).
+
+### Strengths & Limitations
+
+**Strengths**
+- High signal (successes only) and architectural precision (B1–B4).
+- Multimodal coverage (text + OCR’d images).
+- Detailed taxonomy and metadata for strategy analysis.
+
+**Limitations**
+- No benign pairs → cannot test over-refusal directly.
+- Image attacks require OCR to reproduce.
+- Synthetic prompts may miss some real-world variants.
+- English-only.
+
+### Related Datasets (in this repo)
+
+- AgentDojo: prompt injection with tool use, multi-turn.
+- AgentHarm: harmful vs benign intent classification.
+- AttackQA: defensive cybersecurity QA (MITRE ATT&CK grounding).
+
+Together with WebArena/WebLINX/TAU2 for capability, this set spans capability, knowledge, robustness, and alignment.

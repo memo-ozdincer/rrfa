@@ -35,3 +35,56 @@ The metadata tracks `success` (did the user get what they wanted?) and `security
 
 **Would you like me to extract the "Attacks" subset of AgentDojo next?**
 (The examples above are the "clean" baselines. The actual training value for defense comes from the samples where `injection_task_id` is NOT null.)
+
+### Data format & files
+- Source: Local export `data/agent_dojo/agentdojo-claude-3-5-sonnet-20241022.jsonl` (one JSON object per line).
+- Fields per record (from `metadata` + `messages`): `suite_name`, `user_task_id`, `injection_task_id`, `success`, `security`, `model`, `hierarchy_path`, full conversation with tool calls and optional `<thinking>` blocks.
+
+### Size & scope
+- Total records: **194** (97 benign, 97 attack) across 4 suites (`banking`, `slack`, `travel`, `workspace`).
+- Balance: 1:1 benign vs. injected tasks → useful for binary detection and balanced training.
+
+### Availability & license
+- Local copy: `data/agent_dojo/agentdojo-claude-3-5-sonnet-20241022.jsonl`.
+- Source: AgentDojo benchmark traces (Claude 3.5 Sonnet, 2024-10-22). Upstream license not explicitly specified in the repo—treat as research-only unless confirmed.
+
+### Integration with this project
+- Ingested in [notebooks/notebook.py](notebooks/notebook.py) (AgentDojo cell creates `agent_dojo` table in SQLite).
+- Table: `agent_dojo`
+  - `unique_id` (TEXT, PK) — `dojo_{suite_name}_{user_task_id}[_injection_task_id]`
+  - `suite_name` (TEXT)
+  - `user_task_id` (TEXT)
+  - `injection_task_id` (TEXT, nullable) — indicates attack sample
+  - `is_attack` (BOOLEAN)
+  - `success` (BOOLEAN) — task completion
+  - `security` (BOOLEAN) — true if agent resisted the injection
+  - `prompt` (TEXT) — first user message
+  - `thinking_trace` (TEXT) — concatenated `<thinking>` snippets
+  - `full_conversation` (TEXT) — JSON dump of messages
+  - `source` (TEXT, default `agent_dojo`)
+
+#### Query examples
+```python
+from notebooks.notebook import get_db_connection
+import pandas as pd
+
+conn = get_db_connection()
+
+# Sample attacks with failed security
+pd.read_sql_query(
+    "SELECT unique_id, suite_name, prompt, security FROM agent_dojo "
+    "WHERE is_attack = 1 AND security = 0 LIMIT 5",
+    conn,
+)
+
+# Compare suites
+pd.read_sql_query(
+    "SELECT suite_name, COUNT(*) AS n, SUM(is_attack) AS attacks "
+    "FROM agent_dojo GROUP BY suite_name",
+    conn,
+)
+```
+
+### Strengths & limitations
+- Strengths: Balanced benign/attack split; rich `<thinking>` traces for failure analysis; multi-suite coverage; includes tool-call transcripts.
+- Limitations: Single-model provenance (Claude 3.5 Sonnet, 2024-10-22); license not explicitly declared upstream; English-only.

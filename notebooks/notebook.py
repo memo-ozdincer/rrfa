@@ -1298,74 +1298,40 @@ def normalize_attackqa(row):
         "label": 0, 
         "meta_technique": row['mitre_technique_id']
     }
-def query_agent_harm(limit: int = 5) -> pd.DataFrame:
-    """Query AgentHarm samples"""
-    conn = get_db_connection()
-    df = pd.read_sql_query(f"SELECT * FROM agent_harm LIMIT {limit}", conn)
-    conn.close()
-    return df
-
-def normalize_agent_harm(row):
-    """
-    Convert AgentHarm row to standard format.
-    Label 1 for 'harmful' subset, 0 for 'benign'.
-    """
-    is_harmful = "harmful" in row['subset']
-    
-    # We use the detailed task description as the 'trace' context
-    # This helps the model understand what the prompt actually entails.
-    context_trace = f"Task Description: {row['description']}\nTools: {row['target_tools']}"
-    
-    return {
-        "id": row['unique_id'],
-        "source": f"agent_harm_{row['subset']}",
-        "prompt": row['prompt'],
-        "trace": context_trace,
-        "label": 1 if is_harmful else 0,
-        "meta_subset": row['subset']
-    }
 
 # --- EXECUTE EXPORT ---
 
 all_training_data = []
 
-print("🚀 Starting Final Harmonization...")
+# 1. WebLINX
+df_weblinx = query_weblinx(limit=1000)
+all_training_data.extend([normalize_weblinx(r) for _, r in df_weblinx.iterrows()])
 
-# 1. WebLINX (Benign UI)
-try: all_training_data.extend([normalize_weblinx(r) for _, r in query_weblinx(1000).iterrows()])
-except: pass
+# 2. TAU2
+df_tau2 = query_tau2('retail', limit=1000) 
+all_training_data.extend([normalize_tau2(r) for _, r in df_tau2.iterrows()])
 
-# 2. TAU2 (Benign Domain)
-try: all_training_data.extend([normalize_tau2(r) for _, r in query_tau2('retail', limit=1000).iterrows()])
-except: pass
+# 3. WebArena
+df_wa = query_webarena_llm(limit=1000)
+all_training_data.extend([normalize_webarena_llm(r) for _, r in df_wa.iterrows()])
 
-# 3. WebArena (Benign/Mixed)
-try: all_training_data.extend([normalize_webarena_llm(r) for _, r in query_webarena_llm(1000).iterrows()])
-except: pass
+# 4. Fujitsu (Red Teaming)
+df_fujitsu = query_fujitsu(limit=2000)
+all_training_data.extend([normalize_fujitsu(r) for _, r in df_fujitsu.iterrows()])
 
-# 4. Fujitsu (Red Teaming / Adversarial)
-try: all_training_data.extend([normalize_fujitsu(r) for _, r in query_fujitsu(2000).iterrows()])
-except: pass
-
-# 5. AgentDojo (Red Teaming / Injection)
-try: all_training_data.extend([normalize_agent_dojo(r) for _, r in query_agent_dojo(2000).iterrows()])
+# 5. AgentDojo (Red Teaming)
+try:
+    df_dojo = query_agent_dojo(limit=2000)
+    all_training_data.extend([normalize_agent_dojo(r) for _, r in df_dojo.iterrows()])
 except: pass
 
 # 6. AttackQA (Security Knowledge)
-try: all_training_data.extend([normalize_attackqa(r) for _, r in query_attackqa(2000).iterrows()])
-except: pass
-
-# 7. AgentHarm (Red Teaming / Intent)
-try:
-    df_harm = query_agent_harm(limit=2000)
-    all_training_data.extend([normalize_agent_harm(r) for _, r in df_harm.iterrows()])
-    print(f"   + Added {len(df_harm)} AgentHarm records")
-except Exception as e:
-    print(f"   ⚠️ Could not export AgentHarm: {e}")
+df_aqa = query_attackqa(limit=2000)
+all_training_data.extend([normalize_attackqa(r) for _, r in df_aqa.iterrows()])
+print(f"   + Added {len(df_aqa)} AttackQA records")
 
 # Save
 with open(TRAINING_DATA_PATH, 'w') as f:
     json.dump(all_training_data, f, indent=2)
 
-print(f"\n🎉 SUCCESS: Harmonized {len(all_training_data)} samples into:")
-print(f"   {TRAINING_DATA_PATH}")
+print(f"🚀 Harmonized {len(all_training_data)} samples into {TRAINING_DATA_PATH}")
