@@ -1,8 +1,8 @@
 data/webarena/human_trajectories
 data/webarena/llm_trajectories_v2
-tau2_repo/.
-agentic-rag-redteam-bench
+tau2_repo/
+agentic-rag-redteam-bench/
 CB_TODO.md
 Implementation-Guide.md
 related_repos/
-unsloth
+unsloth/
