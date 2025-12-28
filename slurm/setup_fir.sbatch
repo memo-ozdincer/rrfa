@@ -3,7 +3,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=12
-#SBATCH --time=00:15:00
+#SBATCH --time=01:00:00
 #SBATCH --chdir=/scratch/memoozd/harmful-agents-meta-dataset
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
