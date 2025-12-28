@@ -1,35 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=cb_llama4_1xh100_smoke_fir
+#SBATCH --job-name=cb_setup_fir
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=12
-#SBATCH --gpus=h100:1
 #SBATCH --time=00:15:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 #SBATCH --account=def-zhijing  # TODO: set your RAC / def-* account
-
-# =============================================================================
-# Circuit Breakers Debug/Smoke Test - Fir 1×H100
-# =============================================================================
-#
-# Fir storage (per Alliance docs):
-#   HOME    = $HOME
-#   SCRATCH = $HOME/scratch
-#   PROJECT = $HOME/project/${def-project-id}
-#
-# Recommended: submit from your SCRATCH clone:
-#   cd $HOME/scratch/harmful-agents-meta-dataset
-#   mkdir -p logs
-#   sbatch slurm/fir_cb_llama4_1xh100_debug.sbatch
-#
-# Notes:
-# - Fir compute nodes have internet access.
-# - Site policy: jobs should be >= 1 hour (>= 5 min for test jobs).
-# - If you want a MIG instance instead of a full H100, replace the GPU line with:
-#     #SBATCH --gpus=nvidia_h100_80gb_hbm3_1g.10gb:1
-#   (or 2g.20gb / 3g.40gb)
-# =============================================================================
 
 set -euo pipefail
 
