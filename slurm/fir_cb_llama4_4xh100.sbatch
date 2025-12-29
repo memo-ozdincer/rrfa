@@ -3,7 +3,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=12
-#SBATCH --gpus=h100:1
+#SBATCH --gpus-per-node=h100:4
 #SBATCH --time=06:00:00
 #SBATCH --chdir=/scratch/memoozd/harmful-agents-meta-dataset
 #SBATCH --output=logs/%x_%j.out
