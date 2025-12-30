@@ -8,7 +8,8 @@
 #SBATCH --time=06:00:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
-#SBATCH --account=def-zhijing
+# TODO: Find your account with: sacctmgr show associations user=$USER
+#SBATCH --account=def-zhiji+
 
 # =============================================================================
 # Circuit Breakers Training - Rorqual 4×H100 (Llama-3.1-8B-Instruct)
