@@ -41,6 +41,13 @@ module load StdEnv/2023
 module load cuda/12.6
 module load python/3.11.5
 
+# On Alliance systems, some modules can remain loaded via default collections.
+# Use --force to unload everything deterministically.
+module --force purge || true
+module load StdEnv/2023
+module load cuda/12.6
+module load python/3.11.5
+
 if [[ ! -d "$VENV_DIR" ]]; then
   echo "ERROR: venv not found at $VENV_DIR"
   echo "Run setup on LOGIN NODE first (no internet on compute):"
@@ -49,6 +56,41 @@ if [[ ! -d "$VENV_DIR" ]]; then
 fi
 
 source "$VENV_DIR/bin/activate"
+
+echo "Python: $(python -V)"
+echo "Which:  $(which python)"
+
+# =============================================================================
+# Preflight: fail early if key packages/CLIs are missing
+# =============================================================================
+python - << 'PY'
+import sys
+
+def check(mod: str) -> None:
+  try:
+    __import__(mod)
+  except Exception as e:
+    print(f"ERROR: failed to import '{mod}': {e}")
+    sys.exit(1)
+
+for m in ("torch", "transformers", "accelerate"):
+  check(m)
+
+import torch, transformers, accelerate
+print("torch:", torch.__version__)
+print("transformers:", transformers.__version__)
+print("accelerate:", accelerate.__version__)
+PY
+
+if ! python -m accelerate.commands.launch --help >/dev/null 2>&1; then
+  echo "ERROR: Accelerate is not runnable in this venv ($VENV_DIR)."
+  echo "This typically means the login-node setup did not complete, or the venv is stale."
+  echo "Fix on LOGIN NODE (compute has no internet):"
+  echo "  cd $REPO_DIR"
+  echo "  bash slurm/setup_rorqual.sbatch"
+  echo "Then resubmit this job."
+  exit 1
+fi
 
 # =============================================================================
 # Hardcoded API Tokens (for memoozd only - do not share)
@@ -106,7 +148,7 @@ echo "Model: meta-llama/Llama-3.1-8B-Instruct"
 echo "Output: $RUN_DIR/outputs/cb_llama31_8b_instruct"
 echo "========================================"
 
-accelerate launch \
+python -m accelerate.commands.launch \
   --num_processes 4 \
   --mixed_precision bf16 \
   --main_process_port $MASTER_PORT \

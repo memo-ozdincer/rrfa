@@ -43,7 +43,7 @@ CACHE_ROOT="$PROJECT_DIR/cb_cache"
 mkdir -p "$PROJECT_DIR/.venvs" "$REPO_DIR/logs" "$CACHE_ROOT"/{hf,wandb,torch,xdg}
 cd "$REPO_DIR"
 
-module purge || true
+module --force purge || true
 module load StdEnv/2023
 module load cuda/12.6
 module load python/3.11.5
