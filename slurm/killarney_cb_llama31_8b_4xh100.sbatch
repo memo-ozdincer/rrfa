@@ -34,7 +34,8 @@ VENV_DIR="$PROJECT_DIR/.venvs/cb_env"
 
 cd "$REPO_DIR"
 
-module purge || true
+# Use --force to unload all modules deterministically
+module --force purge || true
 module load StdEnv/2023
 module load cuda/12.6
 module load python/3.11.5
@@ -50,6 +51,30 @@ if [[ ! -d "$VENV_DIR" ]]; then
 fi
 
 source "$VENV_DIR/bin/activate"
+
+echo "Python: $(python -V)"
+echo "Which:  $(which python)"
+
+# =============================================================================
+# Preflight: fail early if key packages are missing
+# =============================================================================
+python - << 'PY'
+import sys
+
+def check(mod: str) -> None:
+    try:
+        __import__(mod)
+    except Exception as e:
+        print(f"ERROR: failed to import '{mod}': {e}")
+        sys.exit(1)
+
+for m in ("torch", "transformers", "peft"):
+    check(m)
+
+import torch, transformers
+print("torch:", torch.__version__)
+print("transformers:", transformers.__version__)
+PY
 
 # =============================================================================
 # Hardcoded API Tokens (for memoozd only - do not share)
@@ -76,7 +101,6 @@ mkdir -p "$RUN_DIR"
 CACHE_ROOT="$PROJECT_DIR/cb_cache"
 mkdir -p "$CACHE_ROOT"/{hf,wandb,torch,xdg}
 export HF_HOME="$CACHE_ROOT/hf"
-export TRANSFORMERS_CACHE="$CACHE_ROOT/hf/transformers"
 export HF_DATASETS_CACHE="$CACHE_ROOT/hf/datasets"
 export WANDB_DIR="$CACHE_ROOT/wandb"
 export TORCH_HOME="$CACHE_ROOT/torch"
@@ -99,7 +123,7 @@ export MASTER_PORT=29500
 # =============================================================================
 # PyTorch Memory Optimization
 # =============================================================================
-export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+export PYTORCH_ALLOC_CONF="expandable_segments:True"
 
 # =============================================================================
 # Job Info

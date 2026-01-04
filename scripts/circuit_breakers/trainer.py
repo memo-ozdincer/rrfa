@@ -859,13 +859,10 @@ class CircuitBreakerTrainer:
         
         # Load tokenizer (HF gated models require an auth token)
         hf_token = resolve_hf_token()
-        # Always use local_files_only=True on HPC compute nodes (no internet)
-        # Transformers will retry and timeout gracefully if files are missing from cache.
         self.tokenizer = AutoTokenizer.from_pretrained(
             config.base_model,
             token=hf_token,
             trust_remote_code=True,
-            local_files_only=True,
         )
         # Right padding is typical for causal LM training.
         if getattr(self.tokenizer, "padding_side", None) != "right":
@@ -920,7 +917,6 @@ class CircuitBreakerTrainer:
             device_map=device_map,
             trust_remote_code=True,
             token=hf_token,
-            local_files_only=True,
         )
         
         if self.config.gradient_checkpointing:
@@ -948,7 +944,6 @@ class CircuitBreakerTrainer:
             device_map=device_map,
             trust_remote_code=True,
             token=hf_token,
-            local_files_only=True,
         )
         self.frozen_model.eval()
         for param in self.frozen_model.parameters():
