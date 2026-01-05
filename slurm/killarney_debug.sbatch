@@ -84,7 +84,7 @@ export WANDB_DIR="$CACHE_ROOT/wandb"
 export TORCH_HOME="$CACHE_ROOT/torch"
 export XDG_CACHE_HOME="$CACHE_ROOT/xdg"
 
-export WANDB_MODE=offline
+export WANDB_MODE=online
 export WANDB_PROJECT=circuit-breakers-debug
 
 echo "=== RUNNING ACTUAL TRAINING (3 steps) ==="

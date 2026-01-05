@@ -135,7 +135,7 @@ export XDG_CACHE_HOME="$CACHE_ROOT/xdg"
 # =============================================================================
 # W&B Configuration (disabled for debug by default)
 # =============================================================================
-export WANDB_MODE="${WANDB_MODE:-disabled}"
+export WANDB_MODE="${WANDB_MODE:-online}"
 export WANDB_PROJECT=circuit-breakers
 
 # =============================================================================
