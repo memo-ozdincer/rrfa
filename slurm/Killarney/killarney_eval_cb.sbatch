@@ -59,6 +59,17 @@ echo "Which:  $(which python)"
 # Environment
 # =============================================================================
 
+# API Tokens (should be set on login node before sbatch)
+# Job inherits environment, but verify they're set
+if [[ -z "$HF_TOKEN" ]]; then
+  echo "WARNING: HF_TOKEN not set. Model download may fail for gated models."
+  echo "Set it on login node: export HF_TOKEN=hf_..."
+fi
+
+if [[ -z "$WANDB_API_KEY" ]]; then
+  echo "WARNING: WANDB_API_KEY not set. W&B logging will be disabled."
+fi
+
 CACHE_ROOT="$PROJECT_DIR/cb_cache"
 mkdir -p "$CACHE_ROOT"/{hf,wandb,torch,xdg}
 export HF_HOME="$CACHE_ROOT/hf"

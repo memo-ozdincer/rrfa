@@ -10,7 +10,9 @@ Utilities for evaluating Circuit Breaker trained models:
 """
 
 import json
+import os
 import re
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any, Callable
 
@@ -19,7 +21,13 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 
-from .hf_utils import resolve_hf_token
+# Handle both script and module imports
+try:
+    from .hf_utils import resolve_hf_token
+except ImportError:
+    # Running as script, add parent to path
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from circuit_breakers.hf_utils import resolve_hf_token
 
 
 # =============================================================================
@@ -875,15 +883,28 @@ def main():
     wandb_run = None
     if use_wandb:
         try:
-            import os
-            from scripts.utils.wandb_logging import (
-                build_wandb_init_kwargs,
-                get_git_metadata,
-                get_host_metadata,
-                get_slurm_metadata,
-                parse_tags,
-                wandb_is_available,
-            )
+            # Handle both script and module imports
+            try:
+                from scripts.utils.wandb_logging import (
+                    build_wandb_init_kwargs,
+                    get_git_metadata,
+                    get_host_metadata,
+                    get_slurm_metadata,
+                    parse_tags,
+                    wandb_is_available,
+                )
+            except ImportError:
+                # Add repo root to path
+                repo_root = Path(__file__).resolve().parents[2]
+                sys.path.insert(0, str(repo_root))
+                from scripts.utils.wandb_logging import (
+                    build_wandb_init_kwargs,
+                    get_git_metadata,
+                    get_host_metadata,
+                    get_slurm_metadata,
+                    parse_tags,
+                    wandb_is_available,
+                )
 
             if wandb_is_available():
                 repo_dir = Path(__file__).resolve().parents[2]
