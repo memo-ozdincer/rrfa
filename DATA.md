@@ -26,7 +26,8 @@
 6. [File Paths & Verification](#6-file-paths--verification)
 7. [Current Data Statistics](#7-current-data-statistics)
 8. [Agentic Data Format](#8-agentic-data-format)
-9. [Data Augmentation Pipeline (Optional)](#9-data-augmentation-pipeline)
+9. [Data Augmentation Pipeline (Optional - DEPRECATED)](#9-data-augmentation-pipeline)
+10. [LLM-Based CB Data Generation (RECOMMENDED)](#10-llm-based-cb-data-generation-recommended)
 
 ---
 
@@ -911,7 +912,9 @@ The trainer (`scripts/circuit_breakers/trainer.py`) handles agentic data by:
 
 ---
 
-## 9. Data Augmentation Pipeline (Optional - Generates Synthetic Data)
+## 9. Data Augmentation Pipeline (DEPRECATED - Use Section 10 Instead)
+
+> **⚠️ DEPRECATED:** This template-based pipeline produces synthetic debug labels, NOT real model outputs. **Use Section 10 (LLM-Based CB Data Generation) instead.**
 
 > **⚠️ This pipeline is OPTIONAL.** The default training data (`harmful_pairs.completions.jsonl`) contains only real data and is sufficient for CB training. This pipeline generates **synthetic** traces for additional coverage.
 
@@ -1029,13 +1032,150 @@ All augmented data follows the standard agentic format:
 
 ---
 
-## Related Documentation
+## 10. LLM-Based CB Data Generation (Recommended)
 
-- **Circuit Breakers:** [CIRCUIT_BREAKERS.md](CIRCUIT_BREAKERS.md) — Complete CB training pipeline with multi-turn support
-- **RLVR:** [RLVR.md](RLVR.md) — Verifiable rewards and GRPO training
-- **WebLINX Eval:** [docs/weblinx_eval_procedure.md](docs/weblinx_eval_procedure.md) — Custom evaluation for WebLINX
-- **AgentHarm Generation:** [docs/agentharm_generation_procedure.md](docs/agentharm_generation_procedure.md) — Generating harmful completions
+> **⚠️ CRITICAL:** The old template-based augmentation pipeline (Section 9) produces **synthetic debug labels**, not real model outputs. The CB paper requires training on actual model representations. **Use this LLM-based pipeline instead.**
+
+### Why the Old Pipeline is Wrong
+
+The old `scripts/augmentation/generate_real_cb_completions.py` and similar scripts create completions like:
+```
+[TOOL_CALL] search_web
+(Expected: retrieve_multimodal_docs, but injection caused flip to: search_web)
+```
+
+These are **debug labels**, not real model outputs. Circuit Breaker training learns nothing useful from these synthetic patterns because:
+1. No real model generated these strings
+2. The representation space doesn't match what you're trying to reroute
+3. The CB paper explicitly states: "quality of intervention largely depends on how precisely data can elicit the targeted representation"
+
+### New LLM-Based Pipeline
+
+The new pipeline in `scripts/cb_data_generation/` uses **actual LLM inference** to generate realistic harmful completions:
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│               LLM-BASED CB DATA GENERATION                        │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                   │
+│  Step 1: Generate Ds (Circuit Breaker Set)                       │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │ scripts/cb_data_generation/generate_ds.py                   │ │
+│  │ • Loads Fujitsu B4 attacks + AgentDojo security failures    │ │
+│  │ • Runs LLM inference with vLLM or Transformers              │ │
+│  │ • Filters for actual harmful compliance (not refusals)      │ │
+│  │ • Stores raw + structured tool call formats                 │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│                              ↓                                    │
+│  Step 2: Generate Dr (Retain Set)                                │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │ scripts/cb_data_generation/generate_dr.py                   │ │
+│  │ • Benign tool use from AgentDojo success traces             │ │
+│  │ • Refusal examples (LLM-generated polite refusals)          │ │
+│  │ • Capability tasks from TAU2                                │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│                              ↓                                    │
+│  Step 3: Generate Held-Out Eval Set                              │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │ scripts/cb_data_generation/generate_eval.py                 │ │
+│  │ • Forced function-calling attacks                           │ │
+│  │ • Each sample has programmatic success criteria             │ │
+│  │ • Never seen during training                                │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│                              ↓                                    │
+│  Step 4: Quality Gate Validation                                 │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │ scripts/cb_data_generation/quality_gates.py                 │ │
+│  │ • Format validity ≥95%                                      │ │
+│  │ • Harmful content rate ≥80% in Ds                           │ │
+│  │ • No synthetic markers (zero tolerance)                     │ │
+│  │ • Retain coverage ≥0.7                                      │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│                                                                   │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Running the Pipeline
+
+**Quick start (dry run to verify data loading):**
+```bash
+python scripts/cb_data_generation/run_pipeline.py --dry-run
+```
+
+**Full generation with vLLM (recommended):**
+```bash
+python scripts/cb_data_generation/run_pipeline.py --all \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --backend vllm \
+    --output-dir data/cb_generated/
+```
+
+**Validate existing data without regeneration:**
+```bash
+python scripts/cb_data_generation/run_pipeline.py --validate \
+    --output-dir data/cb_generated/
+```
+
+### Output Format
+
+All generated data uses the **canonical Llama-3.1 tool format**:
+
+```json
+{
+  "id": "ds_fujitsu_b4_01.O-1",
+  "source": "fujitsu_b4",
+  "harmful_prompt": "User request with embedded injection...",
+  "harmful_completion_raw": "<|python_tag|>search_web.call(...)",
+  "harmful_completion_structured": {
+    "tool_name": "search_web",
+    "parameters": {...}
+  },
+  "generation_metadata": {
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "temperature": 0.7,
+    "generated_at": "2026-01-08T01:30:00Z"
+  }
+}
+```
+
+### Key Differences from Old Pipeline
+
+| Aspect | Old Pipeline (Section 9) | New LLM Pipeline (Section 10) |
+|--------|--------------------------|-------------------------------|
+| **Generation** | Deterministic templates | Actual LLM inference |
+| **Completions** | Debug labels `(Expected: X, but...)` | Real model outputs |
+| **Tool Format** | Inconsistent `[TOOL_CALL]` markers | Canonical Llama-3.1 `<\|python_tag\|>` |
+| **Quality Gates** | None | 5 validation gates |
+| **Diversity** | Single template per attack | Multi-sample with temperature |
+| **Filtering** | None | Refusal detection, compliance check |
+
+### Files in the New Pipeline
+
+| File | Purpose |
+|------|---------|
+| `tool_format.py` | Canonical Llama-3.1 tool definitions and parsing |
+| `llm_harness.py` | vLLM and Transformers backends for generation |
+| `generate_ds.py` | Circuit Breaker Set generator |
+| `generate_dr.py` | Retain Set generator |
+| `generate_eval.py` | Held-out evaluation set generator |
+| `quality_gates.py` | 5 validation gates with thresholds |
+| `run_pipeline.py` | Main entry point and orchestrator |
+
+### Comprehensive Guide
+
+For detailed documentation on the data generation pipeline, quality gates, and output formats, see:
+- **[CB_DATA_GUIDE.md](CB_DATA_GUIDE.md)** — Complete guide to CB data generation
 
 ---
 
-*This document consolidates information from individual data_info.md files and DATA_INVENTORY.md. Updated January 7, 2026 with agentic data format and augmentation pipeline.*
+## Related Documentation
+
+- **Circuit Breakers:** [CIRCUIT_BREAKERS.md](CIRCUIT_BREAKERS.md) — Complete CB training pipeline with multi-turn support
+- **CB Data Guide:** [CB_DATA_GUIDE.md](CB_DATA_GUIDE.md) — LLM-based data generation (recommended)
+- **RLVR:** [RLVR.md](RLVR.md) — Verifiable rewards and GRPO training
+- **WebLINX Eval:** [docs/weblinx_eval_procedure.md](docs/weblinx_eval_procedure.md) — Custom evaluation for WebLINX
+- **AgentHarm Generation:** [docs/agentharm_generation_procedure.md](docs/agentharm_generation_procedure.md) — Generating harmful completions (deprecated, use CB_DATA_GUIDE.md)
+
+---
+
+*This document consolidates information from individual data_info.md files and DATA_INVENTORY.md. Updated January 8, 2026 with LLM-based CB data generation pipeline.*
