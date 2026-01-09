@@ -95,6 +95,10 @@ def main():
                        help="Skip LLM generation, use existing completions only")
     parser.add_argument("--strict", action="store_true",
                        help="Fail validation on any warning")
+    parser.add_argument("--resume", action="store_true",
+                       help="Resume from existing output, skip already-generated IDs")
+    parser.add_argument("--batch-size", type=int, default=64,
+                       help="Batch size for LLM generation (default: 64)")
     
     args = parser.parse_args()
     
@@ -137,6 +141,10 @@ def main():
             cmd.append("--dry-run")
         if args.skip_generation:
             cmd.append("--skip-generation")
+        if args.resume:
+            cmd.append("--resume")
+        if args.batch_size:
+            cmd.extend(["--batch-size", str(args.batch_size)])
         
         success = run_command(cmd, "Generate Circuit Breaker Set (Ds)")
         results.append(("Ds Generation", success))

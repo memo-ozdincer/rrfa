@@ -106,6 +106,8 @@ echo "========================================"
 # Standard Llama-3.1-Instruct will refuse!
 
 # Using tensor_parallel=4 to shard model across 4 GPUs for faster inference
+# --resume: continue from where we left off
+# --batch-size 64: reasonable batch size to avoid memory issues
 python scripts/cb_data_generation/run_pipeline.py \
     --all \
     --model mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated \
@@ -113,6 +115,8 @@ python scripts/cb_data_generation/run_pipeline.py \
     --tensor-parallel 4 \
     --temperature 0.7 \
     --num-samples 3 \
+    --batch-size 64 \
+    --resume \
     --output-dir data/circuit_breakers/
 
 echo "========================================"
@@ -123,4 +127,4 @@ echo "  Ds: data/circuit_breakers/ds/circuit_breaker_set.jsonl"
 echo "  Dr: data/circuit_breakers/dr/retain_set.jsonl"
 echo "  Eval: data/circuit_breakers/eval/eval_set.jsonl"
 echo "  Report: data/circuit_breakers/quality_report.json"
-echo "========================================""
+echo "========================================"
