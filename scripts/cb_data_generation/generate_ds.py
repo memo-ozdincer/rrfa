@@ -473,6 +473,17 @@ def main():
         action="store_true",
         help="Skip LLM generation, only use records with existing completions",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from existing output file, skip already-generated IDs",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=64,
+        help="Batch size for LLM generation (default: 64, reduce if OOM)",
+    )
     
     args = parser.parse_args()
     
@@ -561,7 +572,22 @@ def main():
         "generated": 0,
         "successful": 0,
         "skipped": 0,
+        "resumed": 0,
     }
+    
+    # Load already-generated IDs if resuming
+    already_generated_ids = set()
+    if args.resume and args.output.exists():
+        logger.info(f"Resume mode: loading existing IDs from {args.output}...")
+        with open(args.output, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    try:
+                        record = json.loads(line)
+                        already_generated_ids.add(record.get("id", "").split("#")[0])  # Remove sample suffix
+                    except json.JSONDecodeError:
+                        continue
+        logger.info(f"Found {len(already_generated_ids)} already-generated records")
     
     # Separate records into those with existing completions vs needing generation
     records_with_existing = []
@@ -569,6 +595,13 @@ def main():
     
     for record in all_records:
         stats["total"] += 1
+        record_id = record.get("id", "")
+        
+        # Skip if already generated (resume mode)
+        if record_id in already_generated_ids:
+            stats["resumed"] += 1
+            continue
+        
         has_existing = record.get("has_real_completion") or record.get("assistant_raw")
         
         if has_existing:
@@ -581,39 +614,47 @@ def main():
     
     logger.info(f"Records with existing completions: {len(records_with_existing)}")
     logger.info(f"Records needing generation: {len(records_needing_generation)}")
+    if args.resume:
+        logger.info(f"Skipped (already generated): {stats['resumed']}")
     
-    with open(args.output, "w", encoding="utf-8") as f:
-        # First, write records with existing completions
-        for i, record in enumerate(records_with_existing):
-            try:
-                ds_record = generate_ds_record(
-                    record,
-                    harness=None,
-                    config=config,
-                    redact_harmful_prompt=args.redact_harmful_prompt,
-                )
-                if ds_record:
-                    f.write(json.dumps(ds_record, ensure_ascii=False) + "\n")
-                    stats["successful"] += 1
-            except Exception as e:
-                logger.error(f"Error processing {record['id']}: {e}")
+    # Open in append mode if resuming, write mode otherwise
+    file_mode = "a" if args.resume and args.output.exists() else "w"
+    
+    with open(args.output, file_mode, encoding="utf-8") as f:
+        # First, write records with existing completions (skip if resuming and they're already there)
+        if not args.resume or not already_generated_ids:
+            for i, record in enumerate(records_with_existing):
+                try:
+                    ds_record = generate_ds_record(
+                        record,
+                        harness=None,
+                        config=config,
+                        redact_harmful_prompt=args.redact_harmful_prompt,
+                    )
+                    if ds_record:
+                        f.write(json.dumps(ds_record, ensure_ascii=False) + "\n")
+                        stats["successful"] += 1
+                except Exception as e:
+                    logger.error(f"Error processing {record['id']}: {e}")
+                
+                # Flush every 1000 records to ensure data is saved
+                if (i + 1) % 1000 == 0:
+                    f.flush()
+                    logger.info(f"Written {i + 1}/{len(records_with_existing)} existing records...")
             
-            # Flush every 1000 records to ensure data is saved
-            if (i + 1) % 1000 == 0:
-                f.flush()
-                logger.info(f"Written {i + 1}/{len(records_with_existing)} existing records...")
-        
-        # Flush after existing records
-        f.flush()
-        logger.info(f"Finished writing {stats['successful']} existing records")
+            # Flush after existing records
+            f.flush()
+            logger.info(f"Finished writing {stats['successful']} existing records")
         
         # Now batch-generate for records that need LLM inference
         if records_needing_generation and harness is not None:
             stats["generated"] = len(records_needing_generation)
             
-            # Prepare batch of prompts - larger batch = more efficient vLLM utilization
-            batch_size = 512  # vLLM can handle large batches efficiently with TP
+            # Use smaller batches to avoid memory issues
+            batch_size = args.batch_size
             total_batches = (len(records_needing_generation) + batch_size - 1) // batch_size
+            
+            logger.info(f"Starting LLM generation: {len(records_needing_generation)} records in {total_batches} batches of {batch_size}")
             
             for batch_idx in range(total_batches):
                 start_idx = batch_idx * batch_size
