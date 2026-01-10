@@ -56,6 +56,7 @@ echo "Which:  $(which python)"
 CACHE_ROOT="$SCRATCH_DIR/cb_cache"
 mkdir -p "$CACHE_ROOT"/{hf,torch}
 export HF_HOME="$CACHE_ROOT/hf"
+export HF_HUB_CACHE="$CACHE_ROOT/hf/hub"  # Explicit hub cache location
 export HF_DATASETS_CACHE="$CACHE_ROOT/hf/datasets"
 export TRANSFORMERS_CACHE="$CACHE_ROOT/hf/transformers"
 export TORCH_HOME="$CACHE_ROOT/torch"

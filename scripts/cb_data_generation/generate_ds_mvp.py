@@ -146,52 +146,30 @@ def load_fujitsu_b4(
 # Model Loading and Generation
 # =============================================================================
 
-def resolve_local_model_path(model_id: str) -> str:
+def resolve_local_model_path(model_id: str, hf_token: Optional[str] = None) -> str:
     """
-    Resolve a HuggingFace model ID to its local cache path.
+    Resolve a HuggingFace model ID to its local cache path using snapshot_download.
     
     When in offline mode, we need to pass the actual local path instead of
     a Hub model ID to avoid API calls during model_info() checks.
     """
-    from huggingface_hub import scan_cache_dir, HfFolder
+    from huggingface_hub import snapshot_download
     
     # If it's already a local path, return as-is
     if os.path.isdir(model_id):
         return model_id
     
-    # Try to find in HF cache
+    # Use snapshot_download with local_files_only=True to get cached path
     try:
-        cache_info = scan_cache_dir()
-        # Model IDs in cache are stored as "models--org--name"
-        cache_name = "models--" + model_id.replace("/", "--")
-        
-        for repo in cache_info.repos:
-            if repo.repo_id == model_id:
-                # Get the latest revision
-                for revision in repo.revisions:
-                    snapshot_path = revision.snapshot_path
-                    if os.path.isdir(snapshot_path):
-                        return str(snapshot_path)
-        
-        # Fallback: construct path manually
-        hf_home = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
-        hub_cache = os.path.join(hf_home, "hub")
-        model_cache = os.path.join(hub_cache, cache_name)
-        
-        if os.path.isdir(model_cache):
-            # Find the snapshots directory
-            snapshots_dir = os.path.join(model_cache, "snapshots")
-            if os.path.isdir(snapshots_dir):
-                # Get the first (usually only) snapshot
-                snapshots = os.listdir(snapshots_dir)
-                if snapshots:
-                    return os.path.join(snapshots_dir, snapshots[0])
-        
+        local_path = snapshot_download(
+            repo_id=model_id,
+            local_files_only=True,
+            token=hf_token,
+        )
+        return local_path
     except Exception as e:
         logger.warning(f"Could not resolve local path for {model_id}: {e}")
-    
-    # Return original if we couldn't resolve
-    return model_id
+        return model_id
 
 
 def load_model_and_tokenizer(
@@ -211,7 +189,7 @@ def load_model_and_tokenizer(
     
     # In offline mode, resolve Hub ID to local cache path to avoid API calls
     if offline_mode:
-        resolved_path = resolve_local_model_path(model_path)
+        resolved_path = resolve_local_model_path(model_path, hf_token)
         if resolved_path != model_path:
             logger.info(f"  Resolved to local path: {resolved_path}")
         model_path = resolved_path

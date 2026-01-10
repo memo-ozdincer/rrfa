@@ -29,9 +29,10 @@ VENV_DIR="$PROJECT_DIR/.venvs/cb_env"
 
 # Cache directories (same as in SLURM scripts)
 CACHE_ROOT="$SCRATCH_DIR/cb_cache"
-mkdir -p "$CACHE_ROOT"/{hf,torch}
+mkdir -p "$CACHE_ROOT"/{hf/hub,hf/datasets,hf/transformers,torch}
 
 export HF_HOME="$CACHE_ROOT/hf"
+export HF_HUB_CACHE="$CACHE_ROOT/hf/hub"
 export HF_DATASETS_CACHE="$CACHE_ROOT/hf/datasets"
 export TRANSFORMERS_CACHE="$CACHE_ROOT/hf/transformers"
 export TORCH_HOME="$CACHE_ROOT/torch"
