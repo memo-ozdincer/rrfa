@@ -38,6 +38,7 @@ VENV_DIR="$PROJECT_DIR/.venvs/cb_env"
 
 cd "$REPO_DIR"
 
+
 # Load modules
 module --force purge || true
 module load StdEnv/2023

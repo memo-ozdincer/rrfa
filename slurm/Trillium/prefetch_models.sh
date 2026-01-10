@@ -89,25 +89,39 @@ MODELS=(
 )
 
 echo "========================================"
-echo "Downloading Models via snapshot_download"
+echo "Checking and Downloading Models"
 echo "========================================"
 echo "Using snapshot_download ensures proper Hub cache structure for offline mode"
 echo ""
 
 for MODEL in "${MODELS[@]}"; do
     echo ""
-    echo "--- Downloading: $MODEL ---"
+    echo "--- Checking: $MODEL ---"
     
     python -c "
 import os
-from huggingface_hub import snapshot_download
+from huggingface_hub import snapshot_download, try_to_load_from_cache, repo_info
+from pathlib import Path
 
 model_name = '$MODEL'
 hf_token = os.environ.get('HF_TOKEN')
 cache_dir = os.environ['HF_HUB_CACHE']
 
-print(f'Downloading {model_name} to {cache_dir}...')
-print('(This may take a while for large models)')
+# Check if model is already fully cached
+# Look for the cache directory structure
+model_cache_name = model_name.replace('/', '--')
+model_cache_path = Path(cache_dir) / f'models--{model_cache_name}'
+
+if model_cache_path.exists():
+    # Check if it has snapshot directories (means model files are there)
+    snapshots_path = model_cache_path / 'snapshots'
+    if snapshots_path.exists() and any(snapshots_path.iterdir()):
+        print(f'✅ Model already cached at: {model_cache_path}')
+        print('   Skipping download (use --force to re-download)')
+        exit(0)
+
+print(f'📥 Downloading {model_name} to {cache_dir}...')
+print('   (This may take a while for large models)')
 
 # Download using snapshot_download - this creates the exact cache structure
 # that offline mode expects (models--org--name/snapshots/hash/...)
@@ -117,6 +131,7 @@ try:
         cache_dir=cache_dir,
         token=hf_token,
         resume_download=True,
+        local_files_only=False,  # Allow internet access
     )
     print(f'✅ Model cached successfully to: {local_path}')
 except Exception as e:
@@ -125,9 +140,9 @@ except Exception as e:
 "
     
     if [[ $? -eq 0 ]]; then
-        echo "✅ $MODEL downloaded successfully"
+        echo "✅ $MODEL ready"
     else
-        echo "❌ Failed to download $MODEL"
+        echo "❌ Failed to process $MODEL"
         exit 1
     fi
 done
@@ -188,6 +203,26 @@ except Exception as e:
 "
 
 # =============================================================================
+# Verify All Models Are Cached
+# =============================================================================
+echo ""
+echo "========================================"
+echo "Verifying Cached Models"
+echo "========================================"
+echo ""
+
+for MODEL in "${MODELS[@]}"; do
+    MODEL_CACHE_NAME="${MODEL//\/\/--}"
+    MODEL_PATH="$HF_HUB_CACHE/models--${MODEL_CACHE_NAME}"
+    
+    if [[ -d "$MODEL_PATH/snapshots" ]] && [[ -n "$(ls -A "$MODEL_PATH/snapshots" 2>/dev/null)" ]]; then
+        echo "✅ $MODEL"
+    else
+        echo "❌ $MODEL (MISSING - download may have failed)"
+    fi
+done
+
+# =============================================================================
 # Check Disk Space
 # =============================================================================
 echo ""
@@ -204,7 +239,10 @@ echo ""
 echo "Scratch quota:"
 diskusage_report 2>/dev/null || df -h "$SCRATCH_DIR" 2>/dev/null || echo "  (quota check unavailable)"
 
-# =============================================================================
+# =====
+echo "ℹ️  You only need to run this script once (or when adding new models)."
+echo "   It's safe to run multiple times - already cached models will be skipped."
+echo ""========================================================================
 # Summary
 # =============================================================================
 echo ""
