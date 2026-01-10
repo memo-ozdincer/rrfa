@@ -42,7 +42,10 @@ if [[ ! -d "$VENV_DIR" ]]; then
   echo "ERROR: venv not found at $VENV_DIR"
   exit 1
 fi
-export HF_HOME=/scratch/memoozd/cb_cache/hf
+export CACHE_ROOT=/scratch/memoozd/cb_cache
+export HF_HOME="$CACHE_ROOT/hf"
+export HF_HUB_CACHE="$HF_HOME/hub"
+export HF_DATASETS_CACHE="$HF_HOME/datasets"
 export TRANSFORMERS_CACHE=/scratch/memoozd/cb_cache/hf/transformers
 export HF_HUB_OFFLINE=1 # Optional: fail fast if model not cached
 source "$VENV_DIR/bin/activate"
