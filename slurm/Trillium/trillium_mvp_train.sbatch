@@ -51,7 +51,7 @@ source "$VENV_DIR/bin/activate"
 # Cache Setup (MUST match prefetch_models.sh)
 # =============================================================================
 CACHE_ROOT="$SCRATCH_DIR/cb_cache"
-mkdir -p "$CACHE_ROOT"/{hf/hub,hf/datasets,torch,wandb}
+mkdir -p "$CACHE_ROOT"/{hf/hub,hf/datasets,torch}
 
 # CRITICAL FIX: Override HOME to trick flashinfer and other tools that hardcode ~/.cache
 export HOME="$CACHE_ROOT"
@@ -79,6 +79,33 @@ echo "  HOME: $HOME"
 echo "  HF_HOME: $HF_HOME"
 echo "  HF_HUB_CACHE: $HF_HUB_CACHE"
 echo "  HF_HUB_OFFLINE: $HF_HUB_OFFLINE"
+echo ""
+
+# =============================================================================
+# Verify Cached Models BEFORE Running
+# =============================================================================
+echo "Verifying cached models..."
+for MODEL_NAME in "meta-llama--Llama-3.1-8B-Instruct" "mlabonne--Meta-Llama-3.1-8B-Instruct-abliterated"; do
+    MODEL_PATH="$HF_HUB_CACHE/models--${MODEL_NAME}"
+    if [[ -d "$MODEL_PATH" ]]; then
+        echo "  ✅ Found: $MODEL_NAME"
+        # Check for snapshots subdirectory
+        if [[ -d "$MODEL_PATH/snapshots" ]] && [[ -n "$(ls -A "$MODEL_PATH/snapshots" 2>/dev/null)" ]]; then
+            SNAPSHOT_COUNT=$(find "$MODEL_PATH/snapshots" -mindepth 1 -maxdepth 1 -type d | wc -l)
+            echo "     └─ $SNAPSHOT_COUNT snapshot(s)"
+        else
+            echo "     ⚠️  WARNING: No snapshots/ directory found!"
+            echo "     This model may not work in offline mode."
+        fi
+    else
+        echo "  ❌ MISSING: $MODEL_NAME"
+        echo "     Expected at: $MODEL_PATH"
+        echo ""
+        echo "ERROR: Model not cached. Please run prefetch_models.sh first:"
+        echo "  bash slurm/Trillium/prefetch_models.sh"
+        exit 1
+    fi
+done
 echo ""
 
 # =============================================================================
