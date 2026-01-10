@@ -157,6 +157,7 @@ python scripts/cb_data_generation/generate_ds_mvp.py \
     --min-yield 0.10 \
     --fail-on-low-yield \
     --output "$OUTPUT_DIR/ds_stage1.jsonl" \
+    --limit 2300 \
     --output-ids "$OUTPUT_DIR/ds_stage1_ids.txt"
 
 echo "========================================"
