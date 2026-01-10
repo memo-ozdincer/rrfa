@@ -25,4 +25,5 @@ echo "Using checkpoint: $CB_CKPT"
 
 python scripts/circuit_breakers/compare_outputs.py \
   --base-model meta-llama/Llama-3.1-8B-Instruct \
-  --adapter-path "$CB_CKPT"
+  --adapter-path "$CB_CKPT" \
+  --training-batches data/circuit_breakers/cb_training_batches.jsonl
