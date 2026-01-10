@@ -54,10 +54,6 @@ source "$VENV_DIR/bin/activate"
 CACHE_ROOT="$SCRATCH_DIR/cb_cache"
 mkdir -p "$CACHE_ROOT"/{hf/hub,hf/datasets,torch}
 
-# CRITICAL FIX: Override HOME to trick flashinfer and other tools that hardcode ~/.cache
-# This redirects any tool trying to write to ~/.cache to $CACHE_ROOT/.cache
-export HOME="$CACHE_ROOT"
-
 export HF_HOME="$CACHE_ROOT/hf"
 export HF_HUB_CACHE="$CACHE_ROOT/hf/hub"
 export HF_DATASETS_CACHE="$CACHE_ROOT/hf/datasets"
@@ -90,7 +86,6 @@ echo "Python: $(python -V)"
 echo "Which:  $(which python)"
 echo ""
 echo "Cache Configuration:"
-echo "  HOME: $HOME"
 echo "  HF_HOME: $HF_HOME"
 echo "  HF_HUB_CACHE: $HF_HUB_CACHE"
 echo "  HF_HUB_OFFLINE: $HF_HUB_OFFLINE"
@@ -155,14 +150,14 @@ python scripts/cb_data_generation/generate_ds_mvp.py \
     --b4-data data/fujitsu/orchestrator_attacks_combined_deduplicated.jsonl \
     --tool-schema configs/tool_schemas/b4_standard_v1.json \
     --model mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated \
-    --backend transformers \
+    --backend vllm \
     --tensor-parallel 1 \
+    --batch-size 32 \
     --dtype bfloat16 \
     --temperature 0.7 \
     --min-yield 0.10 \
     --fail-on-low-yield \
     --output "$OUTPUT_DIR/ds_stage1.jsonl" \
-    --limit 2300 \
     --output-ids "$OUTPUT_DIR/ds_stage1_ids.txt"
 
 echo "========================================"
