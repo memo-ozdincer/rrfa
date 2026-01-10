@@ -26,7 +26,7 @@ echo "  Job ID: $DR_JOB"
 
 # 3. Validate - depends on Dr
 echo "Submitting validation (depends on $DR_JOB)..."
-VALIDATE_JOB=$(sbatch --parsable --dependency=afterok:$DR_JOB slurm/Trillium/trillium_mvp_validate.sbatch)
+VALIDATE_JOB=$(sbatch --parsable --dependency=afterok:195236 slurm/Trillium/trillium_mvp_validate.sbatch)
 echo "  Job ID: $VALIDATE_JOB"
 
 # 4. Create Eval Set - depends on Dr (can run parallel with validate)
