@@ -82,33 +82,6 @@ echo "  HF_HUB_OFFLINE: $HF_HUB_OFFLINE"
 echo ""
 
 # =============================================================================
-# Verify Cached Models BEFORE Running
-# =============================================================================
-echo "Verifying cached models..."
-for MODEL_NAME in "meta-llama--Llama-3.1-8B-Instruct" "mlabonne--Meta-Llama-3.1-8B-Instruct-abliterated"; do
-    MODEL_PATH="$HF_HUB_CACHE/models--${MODEL_NAME}"
-    if [[ -d "$MODEL_PATH" ]]; then
-        echo "  ✅ Found: $MODEL_NAME"
-        # Check for snapshots subdirectory
-        if [[ -d "$MODEL_PATH/snapshots" ]] && [[ -n "$(ls -A "$MODEL_PATH/snapshots" 2>/dev/null)" ]]; then
-            SNAPSHOT_COUNT=$(find "$MODEL_PATH/snapshots" -mindepth 1 -maxdepth 1 -type d | wc -l)
-            echo "     └─ $SNAPSHOT_COUNT snapshot(s)"
-        else
-            echo "     ⚠️  WARNING: No snapshots/ directory found!"
-            echo "     This model may not work in offline mode."
-        fi
-    else
-        echo "  ❌ MISSING: $MODEL_NAME"
-        echo "     Expected at: $MODEL_PATH"
-        echo ""
-        echo "ERROR: Model not cached. Please run prefetch_models.sh first:"
-        echo "  bash slurm/Trillium/prefetch_models.sh"
-        exit 1
-    fi
-done
-echo ""
-
-# =============================================================================
 # Job Info
 # =============================================================================
 echo "========================================"
@@ -213,8 +186,8 @@ python -c "
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 print('Loading base model to verify GPU access...')
-tokenizer = AutoTokenizer.from_pretrained('$BASE_MODEL')
-model = AutoModelForCausalLM.from_pretrained('$BASE_MODEL', torch_dtype=torch.bfloat16, device_map='auto')
+tokenizer = AutoTokenizer.from_pretrained('$BASE_MODEL', local_files_only=True)
+model = AutoModelForCausalLM.from_pretrained('$BASE_MODEL', torch_dtype=torch.bfloat16, device_map='auto', local_files_only=True)
 print('✅ Base model loaded successfully')
 del model
 torch.cuda.empty_cache()
