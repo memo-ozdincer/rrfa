@@ -42,11 +42,18 @@ if [[ ! -d "$VENV_DIR" ]]; then
   echo "ERROR: venv not found at $VENV_DIR"
   exit 1
 fi
-
+export HF_HOME=/scratch/memoozd/cb_cache/hf
+export TRANSFORMERS_CACHE=/scratch/memoozd/cb_cache/hf/transformers
+export HF_HUB_OFFLINE=1 # Optional: fail fast if model not cached
 source "$VENV_DIR/bin/activate"
 
 echo "Python: $(python -V)"
 echo "Which:  $(which python)"
+echo "HF_HOME=$HF_HOME"
+echo "HF_HUB_CACHE=$HF_HUB_CACHE"
+echo "TRANSFORMERS_CACHE=$TRANSFORMERS_CACHE"
+ls -ld "$HF_HUB_CACHE" || true
+ls -1 "$HF_HUB_CACHE" | head || true
 
 # =============================================================================
 # Preflight
