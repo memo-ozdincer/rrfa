@@ -96,7 +96,11 @@ BASE_MODEL="meta-llama/Llama-3.1-8B-Instruct"
 # CB checkpoint to evaluate (can be set via env var)
 # Default: use the final checkpoint from most recent run
 if [[ -z "${CB_CHECKPOINT:-}" ]]; then
-  LATEST_RUN=$(ls -td $SCRATCH_DIR/cb_runs/*/outputs/cb_llama31_8b_instruct 2>/dev/null | head -1)
+  # Try v2 first, then v1
+  LATEST_RUN=$(ls -td $SCRATCH_DIR/cb_runs/*/outputs/cb_llama31_8b_instruct_v2 2>/dev/null | head -1)
+  if [[ -z "$LATEST_RUN" ]]; then
+    LATEST_RUN=$(ls -td $SCRATCH_DIR/cb_runs/*/outputs/cb_llama31_8b_instruct 2>/dev/null | head -1)
+  fi
   if [[ -n "$LATEST_RUN" && -d "$LATEST_RUN/final" ]]; then
     CB_CHECKPOINT="$LATEST_RUN/final"
   else
@@ -128,17 +132,16 @@ echo ""
 
 EVAL_DATA_DIR="$REPO_DIR/data/circuit_breakers/eval"
 
-if [[ ! -f "$EVAL_DATA_DIR/harmful_eval.jsonl" ]]; then
-  echo "Extracting eval samples from training data..."
-  python scripts/prepare_eval_data.py \
-    --training-data data/circuit_breakers/cb_training_batches.jsonl \
-    --output-dir "$EVAL_DATA_DIR" \
-    --n-harmful 200 \
-    --n-benign 200 \
-    --seed 42
-else
-  echo "Eval data already exists at $EVAL_DATA_DIR"
-fi
+# Always regenerate eval data to ensure correct format
+echo "Generating eval samples from training data..."
+rm -f "$EVAL_DATA_DIR/harmful_eval.jsonl" "$EVAL_DATA_DIR/benign_eval.jsonl" 2>/dev/null || true
+
+python scripts/prepare_eval_data.py \
+  --training-data data/circuit_breakers/cb_training_batches.jsonl \
+  --output-dir "$EVAL_DATA_DIR" \
+  --n-harmful 200 \
+  --n-benign 200 \
+  --seed 42
 
 HARMFUL_DATA="$EVAL_DATA_DIR/harmful_eval.jsonl"
 BENIGN_DATA="$EVAL_DATA_DIR/benign_eval.jsonl"

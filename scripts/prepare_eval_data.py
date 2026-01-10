@@ -48,24 +48,30 @@ def extract_eval_samples(
     benign_prompts = []
 
     for batch in batches:
-        # Extract harmful samples
-        if 'harmful_samples' in batch:
-            for sample in batch['harmful_samples']:
-                prompt = sample.get('prompt', '')
+        # Extract harmful samples - support both old and new formats
+        harmful_key = 'harmful' if 'harmful' in batch else 'harmful_samples'
+        if harmful_key in batch:
+            for sample in batch[harmful_key]:
+                # Support both 'user_prompt' and 'prompt' fields
+                prompt = sample.get('user_prompt') or sample.get('prompt', '')
                 if prompt and len(harmful_prompts) < n_harmful * 2:
                     harmful_prompts.append({
                         'prompt': prompt,
-                        'type': sample.get('type', 'unknown'),
+                        'type': sample.get('category', sample.get('type', 'unknown')),
+                        'source': sample.get('source', 'unknown'),
                     })
 
-        # Extract benign samples
-        if 'benign_samples' in batch:
-            for sample in batch['benign_samples']:
-                prompt = sample.get('prompt', '')
+        # Extract benign samples - support both old and new formats
+        benign_key = 'benign' if 'benign' in batch else 'benign_samples'
+        if benign_key in batch:
+            for sample in batch[benign_key]:
+                # Support both 'user_prompt' and 'prompt' fields
+                prompt = sample.get('user_prompt') or sample.get('prompt', '')
                 if prompt and len(benign_prompts) < n_benign * 2:
                     benign_prompts.append({
                         'prompt': prompt,
-                        'type': sample.get('type', 'unknown'),
+                        'type': sample.get('category', sample.get('type', 'unknown')),
+                        'source': sample.get('source', 'unknown'),
                     })
 
     # Shuffle and take subsets
