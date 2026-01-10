@@ -208,7 +208,6 @@ class VLLMBackend:
             tensor_parallel_size=tensor_parallel_size,
             max_model_len=max_model_len,
             dtype=dtype,
-            trust_remote_code=True,
         )
         self.tokenizer = self.llm.get_tokenizer()
         self.SamplingParams = SamplingParams
