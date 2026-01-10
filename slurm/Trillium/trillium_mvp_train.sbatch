@@ -77,6 +77,7 @@ BASE_MODEL="meta-llama/Llama-3.1-8B-Instruct"
 DATA_DIR="$SCRATCH_DIR/cb_mvp_data"
 DS_FILE="$DATA_DIR/ds_stage1.jsonl"
 DR_FILE="$DATA_DIR/dr_stage1.jsonl"
+COMBINED_FILE="$DATA_DIR/cb_training_batches.jsonl"
 RUN_DIR="$SCRATCH_DIR/cb_runs/$SLURM_JOB_ID"
 OUTPUT_DIR="$RUN_DIR/outputs/cb_mvp_adapter"
 
@@ -101,6 +102,60 @@ echo "Ds file: $DS_FILE ($(wc -l < "$DS_FILE") samples)"
 echo "Dr file: $DR_FILE ($(wc -l < "$DR_FILE") samples)"
 
 # =============================================================================
+# Combine Ds + Dr into Training Batches
+# =============================================================================
+echo "Combining Ds and Dr into training batches..."
+python -c "
+import json
+from pathlib import Path
+
+ds_file = Path('$DS_FILE')
+dr_file = Path('$DR_FILE')
+output_file = Path('$COMBINED_FILE')
+
+# Load samples
+ds_samples = [json.loads(line) for line in ds_file.read_text().strip().split('\n') if line.strip()]
+dr_samples = [json.loads(line) for line in dr_file.read_text().strip().split('\n') if line.strip()]
+
+print(f'Loaded {len(ds_samples)} Ds samples')
+print(f'Loaded {len(dr_samples)} Dr samples')
+
+# Create batches (1:1 pairing where possible)
+batches = []
+for i, ds in enumerate(ds_samples):
+    # Find corresponding Dr (by paired_with in metadata)
+    dr = None
+    for r in dr_samples:
+        if r.get('metadata', {}).get('paired_with') == ds['id']:
+            dr = r
+            break
+    
+    # If no paired Dr, use any Dr
+    if dr is None and dr_samples:
+        dr = dr_samples[i % len(dr_samples)]
+    
+    batch = {
+        'id': f'batch_{i}',
+        'harmful': ds,
+        'benign': dr,
+    }
+    batches.append(batch)
+
+# Write combined batches
+with output_file.open('w') as f:
+    for batch in batches:
+        f.write(json.dumps(batch) + '\n')
+
+print(f'Wrote {len(batches)} training batches to {output_file}')
+"
+
+if [[ ! -f "$COMBINED_FILE" ]]; then
+    echo "ERROR: Failed to create combined training file"
+    exit 1
+fi
+echo "Combined file: $COMBINED_FILE ($(wc -l < "$COMBINED_FILE") batches)"
+
+# =============================================================================
 # Pre-Training Sanity Check
 # =============================================================================
 echo ""
@@ -123,9 +178,9 @@ echo ""
 echo "Starting Circuit Breaker training..."
 
 python scripts/train_circuit_breaker.py \
-    --model-name "$BASE_MODEL" \
-    --ds-path "$DS_FILE" \
-    --dr-path "$DR_FILE" \
+    --preset llama-3-8b \
+    --base-model "$BASE_MODEL" \
+    --data-path "$COMBINED_FILE" \
     --output-dir "$OUTPUT_DIR" \
     --loss-weighting dual \
     --alpha-max 1.0 \
@@ -134,14 +189,11 @@ python scripts/train_circuit_breaker.py \
     --batch-size 4 \
     --gradient-accumulation-steps 4 \
     --learning-rate 2e-5 \
-    --warmup-steps 50 \
     --lora-r 16 \
     --lora-alpha 32 \
     --cb-target-layers 16 17 18 19 20 21 22 23 \
-    --save-steps 100 \
-    --eval-steps 50 \
-    --logging-steps 10 \
-    --bf16
+    --wandb-project "circuit-breakers-mvp" \
+    --wandb-run-name "cb_mvp_stage1_${SLURM_JOB_ID}"
 
 # =============================================================================
 # Post-Training Sanity Check

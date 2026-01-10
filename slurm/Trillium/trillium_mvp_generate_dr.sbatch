@@ -97,10 +97,9 @@ python scripts/cb_data_generation/generate_dr_mvp.py \
     --ds-data "$DS_FILE" \
     --tool-schema configs/tool_schemas/b4_standard_v1.json \
     --model meta-llama/Llama-3.1-8B-Instruct \
-    --backend vllm \
-    --tensor-parallel 1 \
+    --device auto \
+    --dtype bfloat16 \
     --temperature 0.3 \
-    --max-tokens 512 \
     --output "$OUTPUT_DIR/dr_stage1.jsonl"
 
 echo "========================================"

@@ -90,10 +90,10 @@ echo "Training ID count: $(wc -l < "$DS_IDS")"
 python scripts/cb_data_generation/create_eval_set.py \
     --b4-data data/fujitsu/orchestrator_attacks_combined_deduplicated.jsonl \
     --train-ids "$DS_IDS" \
-    --tool-schema configs/tool_schemas/b4_standard_v1.json \
     --holdout-fraction 0.15 \
-    --min-eval-samples 100 \
-    --max-eval-samples 500 \
+    --min-samples 100 \
+    --max-samples 500 \
+    --stratify-by subtype \
     --output "$OUTPUT_DIR/eval_stage1.jsonl"
 
 echo "========================================"

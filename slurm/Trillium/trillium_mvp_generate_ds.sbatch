@@ -99,12 +99,13 @@ python scripts/cb_data_generation/generate_ds_mvp.py \
     --b4-data data/fujitsu/orchestrator_attacks_combined_deduplicated.jsonl \
     --tool-schema configs/tool_schemas/b4_standard_v1.json \
     --model mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated \
-    --backend vllm \
-    --tensor-parallel 1 \
+    --device auto \
+    --dtype bfloat16 \
     --temperature 0.7 \
-    --max-tokens 512 \
     --min-yield 0.10 \
-    --output "$OUTPUT_DIR/ds_stage1.jsonl"
+    --fail-on-low-yield \
+    --output "$OUTPUT_DIR/ds_stage1.jsonl" \
+    --output-ids "$OUTPUT_DIR/ds_stage1_ids.txt"
 
 echo "========================================"
 echo "Ds generation complete!"
@@ -112,14 +113,6 @@ echo "========================================"
 echo "Output: $OUTPUT_DIR/ds_stage1.jsonl"
 echo ""
 
-# Extract IDs for later use (eval set exclusion)
-python -c "
-import json
-with open('$OUTPUT_DIR/ds_stage1.jsonl', 'r') as f:
-    ids = [json.loads(line)['id'] for line in f if line.strip()]
-with open('$OUTPUT_DIR/ds_stage1_ids.txt', 'w') as f:
-    f.write('\n'.join(ids))
-print(f'Extracted {len(ids)} IDs to ds_stage1_ids.txt')
-"
+# IDs file is created automatically by --output-ids
 
 echo "========================================"

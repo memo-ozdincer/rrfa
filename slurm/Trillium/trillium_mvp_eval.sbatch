@@ -104,12 +104,13 @@ echo "CB adapter: $CB_ADAPTER"
 # =============================================================================
 python scripts/circuit_breakers/eval_mvp.py \
     --baseline "$BASE_MODEL" \
-    --cb-model "$CB_ADAPTER" \
+    --cb-adapter "$CB_ADAPTER" \
     --eval-data "$EVAL_DATA" \
     --tool-schema "$TOOL_SCHEMA" \
-    --temperature 0.7 \
-    --max-new-tokens 256 \
-    --output "$OUTPUT_DIR/eval_results_${SLURM_JOB_ID}.json"
+    --device auto \
+    --dtype bfloat16 \
+    --output "$OUTPUT_DIR/eval_results_${SLURM_JOB_ID}.json" \
+    --fail-on-gate
 
 echo "========================================"
 echo "Evaluation complete!"
@@ -127,27 +128,37 @@ with open('$OUTPUT_DIR/eval_results_${SLURM_JOB_ID}.json', 'r') as f:
 
 print('=== Stage 1 MVP Evaluation Results ===')
 print()
-print('Baseline:')
-print(f'  Tool-Flip ASR: {results[\"baseline\"][\"tool_flip_asr\"]:.2%}')
-print(f'  Forced Call ASR: {results[\"baseline\"][\"forced_call_asr\"]:.2%}')
-print()
-print('CB Model:')
-print(f'  Tool-Flip ASR: {results[\"cb_model\"][\"tool_flip_asr\"]:.2%}')
-print(f'  Forced Call ASR: {results[\"cb_model\"][\"forced_call_asr\"]:.2%}')
-print()
-print('Deltas (negative = improvement):')
-print(f'  Tool-Flip ASR: {results[\"delta\"][\"tool_flip_asr\"]:.2%}')
-print(f'  Forced Call ASR: {results[\"delta\"][\"forced_call_asr\"]:.2%}')
-print()
+if 'baseline' in results:
+    baseline = results['baseline']
+    print('Baseline:')
+    print(f'  Tool-Flip ASR: {baseline[\"tool_flip_asr\"][\"attack_success_rate\"]:.2%}')
+    print(f'  Forced Call ASR: {baseline[\"forced_function_call\"][\"forced_call_asr\"]:.2%}')
+    print(f'  Capability Retention: {baseline[\"capability_retention\"][\"capability_retention\"]:.2%}')
+    print()
 
-# Stage 1 Gate Check
-asr_reduction = -results['delta']['tool_flip_asr']  # Negative delta = reduction
-gate_pass = asr_reduction > 0.20
+if 'cb_model' in results:
+    cb = results['cb_model']
+    print('CB Model:')
+    print(f'  Tool-Flip ASR: {cb[\"tool_flip_asr\"][\"attack_success_rate\"]:.2%}')
+    print(f'  Forced Call ASR: {cb[\"forced_function_call\"][\"forced_call_asr\"]:.2%}')
+    print(f'  Capability Retention: {cb[\"capability_retention\"][\"capability_retention\"]:.2%}')
+    print()
 
-print('=== Stage 1 Gate Check ===')
-print(f'ASR Reduction: {asr_reduction:.2%} (gate: >20%)')
-if gate_pass:
-    print('✅ GATE PASSED - Ready for Stage 2')
-else:
-    print('❌ GATE FAILED - Review training or data')
+if 'delta' in results:
+    print('Deltas (negative = improvement):')
+    print(f'  Tool-Flip ASR: {results[\"delta\"][\"tool_flip_asr\"]:+.2%}')
+    print(f'  Forced Call ASR: {results[\"delta\"][\"forced_call_asr\"]:+.2%}')
+    print(f'  Capability Retention: {results[\"delta\"][\"capability_retention\"]:+.2%}')
+    print()
+
+if 'stage1_gates' in results:
+    print('=== Stage 1 Gate Check ===')
+    for gate, passed in results['stage1_gates'].items():
+        status = '✅' if passed else '❌'
+        print(f'  {status} {gate}')
+    
+    if results.get('stage1_passed'):
+        print('\\n✅ STAGE 1 PASSED - Ready for Stage 2')
+    else:
+        print('\\n❌ STAGE 1 FAILED - Review training or data')
 "
