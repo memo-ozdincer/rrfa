@@ -2,7 +2,7 @@
 #SBATCH --job-name=mvp_ds_1h100
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
-#SBATCH --time=08:00:00
+#SBATCH --time=06:00:00
 #SBATCH --output=/scratch/memoozd/logs/%x_%j.out
 #SBATCH --error=/scratch/memoozd/logs/%x_%j.err
 #SBATCH --account=def-zhijing
@@ -14,11 +14,11 @@
 #
 # Generates Circuit Breaker Ds set using behavioral filtering:
 # - Only includes samples where the attack SUCCEEDS (model calls wrong tool)
-# - Uses transformers backend (single GPU, no tensor parallelism)
+# - Uses vLLM backend with batched inference (single GPU)
 # - Outputs in Llama 3.1 tool-calling format
 #
 # Hardware: 1x NVIDIA H100 SXM (80GB)
-# Estimated time: ~4 hours for full dataset (13k samples)
+# Estimated time: ~1-2 hours for full dataset (13k samples with batching)
 #
 # Submit from $SCRATCH:
 #   cd /scratch/memoozd/harmful-agents-meta-dataset
@@ -113,7 +113,7 @@ echo "========================================"
 echo "Job ID: $SLURM_JOB_ID"
 echo "Date: $(date)"
 echo "GPU: 1 x H100 SXM 80GB"
-echo "Backend: transformers (single GPU)"
+echo "Backend: vLLM (batched inference)"
 echo "Model: mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated"
 echo "========================================"
 
@@ -129,15 +129,16 @@ mkdir -p "$OUTPUT_DIR"
 # IMPORTANT: Use abliterated model so attacks can succeed
 # Standard Llama-3.1-Instruct will refuse harmful completions!
 #
-# Using transformers backend (default) for single GPU
+# Using vLLM backend with batched inference for 10-20x speedup
 # For faster processing, use --limit to reduce dataset size
 
 python scripts/cb_data_generation/generate_ds_mvp.py \
     --b4-data data/fujitsu/orchestrator_attacks_combined_deduplicated.jsonl \
     --tool-schema configs/tool_schemas/b4_standard_v1.json \
     --model mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated \
-    --backend transformers \
-    --device auto \
+    --backend vllm \
+    --tensor-parallel 1 \
+    --batch-size 32 \
     --dtype bfloat16 \
     --temperature 0.7 \
     --min-yield 0.10 \

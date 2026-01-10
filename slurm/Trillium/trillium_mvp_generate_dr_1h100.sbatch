@@ -15,10 +15,10 @@
 # Generates Circuit Breaker Dr set:
 # - Creates benign twins of Ds samples (removes injection)
 # - Only includes samples where model calls CORRECT tool
-# - Uses transformers backend (single GPU, no tensor parallelism)
+# - Uses vLLM backend with batched inference (single GPU)
 #
 # Hardware: 1x NVIDIA H100 SXM (80GB)
-# Estimated time: ~2 hours
+# Estimated time: ~30-60 minutes with batching
 #
 # DEPENDENCY: Run trillium_mvp_generate_ds_1h100.sbatch first!
 #
@@ -110,7 +110,7 @@ echo "========================================"
 echo "Job ID: $SLURM_JOB_ID"
 echo "Date: $(date)"
 echo "GPU: 1 x H100 SXM 80GB"
-echo "Backend: transformers (single GPU)"
+echo "Backend: vLLM (batched inference)"
 echo "Model: meta-llama/Llama-3.1-8B-Instruct"
 echo "========================================"
 
@@ -135,14 +135,15 @@ echo "Ds sample count: $(wc -l < "$DS_FILE")"
 # NOTE: Dr uses the standard (non-abliterated) model for benign twins
 # This ensures the retain set represents normal, safe behavior
 #
-# Using transformers backend (default) for single GPU
+# Using vLLM backend with batched inference for 10-20x speedup
 
 python scripts/cb_data_generation/generate_dr_mvp.py \
     --ds-data "$DS_FILE" \
     --tool-schema configs/tool_schemas/b4_standard_v1.json \
     --model meta-llama/Llama-3.1-8B-Instruct \
-    --backend transformers \
-    --device auto \
+    --backend vllm \
+    --tensor-parallel 1 \
+    --batch-size 32 \
     --dtype bfloat16 \
     --temperature 0.3 \
     --output "$OUTPUT_DIR/dr_stage1.jsonl"
