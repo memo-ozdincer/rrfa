@@ -58,7 +58,7 @@ echo "Eval data: $(wc -l < "$EVAL_DATA") samples"
 
 # Run ONLY CB model evaluation (no --baseline = skip baseline)
 python scripts/circuit_breakers/eval_mvp.py \
-    --cb-adapter "$CB_ADAPTER" \
+    --cb-model "$CB_ADAPTER" \
     --eval-data "$EVAL_DATA" \
     --device auto \
     --dtype bfloat16 \
