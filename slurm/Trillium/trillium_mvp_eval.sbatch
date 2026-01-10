@@ -3,8 +3,8 @@
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
 #SBATCH --time=02:00:00
-#SBATCH --output=/scratch/memoozd/logs/%x_%j.out
-#SBATCH --error=/scratch/memoozd/logs/%x_%j.err
+#SBATCH --output=/project/def-zhijing/memoozd/harmful-agents-meta-dataset/logs/%x_%j.out
+#SBATCH --error=/project/def-zhijing/memoozd/harmful-agents-meta-dataset/logs/%x_%j.err
 #SBATCH --account=def-zhijing
 
 # =============================================================================
@@ -35,7 +35,7 @@ REPO_DIR="$PROJECT_DIR/harmful-agents-meta-dataset"
 VENV_DIR="$PROJECT_DIR/.venvs/cb_env"
 
 cd "$REPO_DIR"
-mkdir -p "$SCRATCH_DIR/logs"
+mkdir -p "$PROJECT_DIR/harmful-agents-meta-dataset/logs"
 
 # Load modules
 module --force purge || true
