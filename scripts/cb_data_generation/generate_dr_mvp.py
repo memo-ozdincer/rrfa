@@ -197,8 +197,6 @@ class VLLMBackend:
             max_model_len=max_model_len,
             dtype=dtype,
             trust_remote_code=True,
-            enable_auto_tool_choice=True,
-            tool_call_parser="llama3_json",
         )
         self.tokenizer = self.llm.get_tokenizer()
         self.SamplingParams = SamplingParams
