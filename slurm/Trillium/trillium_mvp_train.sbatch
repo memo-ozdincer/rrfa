@@ -37,7 +37,7 @@ REPO_DIR="$PROJECT_DIR/harmful-agents-meta-dataset"
 VENV_DIR="$PROJECT_DIR/.venvs/cb_env"
 
 cd "$REPO_DIR"
-mkdir -p "$PROJECT_DIR/harmful-agents-meta-dataset/logs"
+mkdir -p "$SCRATCH_DIR/logs"
 
 # Load modules
 module --force purge || true
