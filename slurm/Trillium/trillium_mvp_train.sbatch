@@ -161,8 +161,8 @@ for i, ds in enumerate(ds_samples):
     
     batch = {
         'id': f'batch_{i}',
-        'harmful': ds,
-        'benign': dr,
+        'harmful': [ds],
+        'benign': [dr],
     }
     batches.append(batch)
 
