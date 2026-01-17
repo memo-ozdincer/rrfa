@@ -52,6 +52,7 @@ os.environ.setdefault("FLASHINFER_WORKSPACE_DIR", os.path.join(cache_root, "flas
 os.environ.setdefault("XDG_CACHE_HOME", os.path.join(cache_root, "xdg_cache"))
 
 import argparse
+import hashlib
 import json
 import logging
 import re
@@ -73,6 +74,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parents[2]
+
+
+# =============================================================================
+# ID Generation (per canonical schema)
+# =============================================================================
+
+def generate_sample_id(source: str, split: str, content_hash_input: str) -> str:
+    """Generate deterministic, collision-resistant ID per 01_DATA_SPEC.md."""
+    content_hash = hashlib.sha256(content_hash_input.encode()).hexdigest()[:8]
+    return f"{source}_{split}_{content_hash}"
 
 
 # =============================================================================
@@ -350,10 +361,11 @@ def generate_adversarial_safe_samples(
     temperature: float = 0.1,
     batch_size: int = 32,
     dry_run: bool = False,
+    model_name: str = "meta-llama/Llama-3.1-8B-Instruct",
 ) -> List[Dict[str, Any]]:
     """
     Generate adversarial-safe samples where model RESISTS injection.
-    
+
     Args:
         b4_records: B4 records with adversarial prompts
         backend: vLLM backend for generation
@@ -363,7 +375,8 @@ def generate_adversarial_safe_samples(
         temperature: Generation temperature (low = more consistent)
         batch_size: Batch size for generation
         dry_run: If True, only report statistics without saving
-    
+        model_name: Model name for metadata
+
     Returns:
         List of adversarial-safe samples for Dr
     """
@@ -417,30 +430,58 @@ def generate_adversarial_safe_samples(
             # Check if model RESISTED the attack
             if tool_name == record["expected_tool"]:
                 stats["resisted"] += 1
-                
+
                 if not dry_run and len(samples) < target_n:
                     # Format the assistant response properly
                     assistant_raw = format_tool_call_output(tool_name, parameters)
-                    
-                    # Create sample for Dr
-                    sample = {
-                        "messages": [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": record["combined_query"]},
-                        ],
+
+                    # Prepare messages
+                    messages = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": record["combined_query"]},
+                    ]
+
+                    # Generate deterministic ID
+                    content_hash_input = json.dumps({
+                        "messages": messages,
                         "assistant_raw": assistant_raw,
+                        "original_id": record["id"],
+                    }, sort_keys=True)
+                    sample_id = generate_sample_id("b4_advsafe", "retain", content_hash_input)
+
+                    # Create sample with canonical schema (01_DATA_SPEC.md)
+                    sample = {
+                        "id": sample_id,
+                        "messages": messages,
+                        "assistant_raw": assistant_raw,
+                        "tools": "b4_standard_v1",  # Reference to frozen tool schema
+
+                        # Labels for loss masking & filtering
                         "labels": {
+                            "split": "retain",
                             "expected_tool": record["expected_tool"],
                             "simulated_tool": record["simulated_tool"],
                             "observed_tool": tool_name,
-                            "is_adversarial_safe": True,
+                            "is_adversarial_safe": True,  # CRITICAL: Model resisted attack
                         },
+
+                        # Training controls
+                        "training": {
+                            "priority_class": "adversarial_safe",
+                            "sample_weight": 2.0,  # Higher weight - these are critical
+                        },
+
+                        # Provenance metadata
                         "metadata": {
-                            "split": "retain",
                             "source": "b4_adversarial_safe",
                             "original_id": record["id"],
                             "attack_category": record["metadata"].get("category"),
                             "has_tool_calls": True,
+                            "schema_version": "stage2_v1",
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                            "pipeline_version": "stage2_v1",
+                            "generator_model": model_name,
+                            "generator_temp": temperature,
                         },
                     }
                     samples.append(sample)
@@ -574,6 +615,7 @@ def main():
         temperature=args.temperature,
         batch_size=args.batch_size,
         dry_run=args.dry_run,
+        model_name=args.model,
     )
     
     if args.dry_run:

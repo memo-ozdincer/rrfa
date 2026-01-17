@@ -1,5 +1,6 @@
 #!/bin/bash
 #SBATCH --account=def-zhijing
+#SBATCH --time=00:30:00
 #SBATCH --job-name=stage2_test_cpu
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=24
