@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=stage2_adv_safe
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=4
+#SBATCH --gpus-per-node=1
 #SBATCH --time=02:00:00
 #SBATCH --output=/scratch/memoozd/logs/%x_%j.out
 #SBATCH --error=/scratch/memoozd/logs/%x_%j.err
@@ -126,10 +126,12 @@ python scripts/cb_data_generation/generate_adversarial_safe.py \
     --tool-schema "$TOOL_SCHEMA" \
     --model meta-llama/Llama-3.1-8B-Instruct \
     --output "$OUTPUT_FILE" \
-    --target-n 500 \
+    --target-n 10 \
     --temperature 0.1 \
-    --batch-size 64 \
-    --tensor-parallel-size 4
+    --batch-size 8 \
+    --tensor-parallel-size 1 \
+    --limit 50 \
+    --dry-run \
 
 echo "========================================"
 echo "Adversarial-safe generation complete!"
