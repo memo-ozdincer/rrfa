@@ -450,17 +450,11 @@ def validate_merge(
     if len(ids) != len(set(ids)):
         errors.append("Duplicate IDs found after merge")
 
-    # Tools presence check for tool samples
+    # Tools presence check: only require tools when sample has tool calls
     for s in merged_samples:
-        labels = s.get("labels", {})
-        priority_class = labels.get("priority_class")
-        split = labels.get("split")
+        has_tool_calls = s.get("metadata", {}).get("has_tool_calls", False)
         tools = s.get("tools")
-        tool_optional = (
-            split == "retain" and
-            priority_class == "general_conversation"
-        )
-        if not tool_optional and (tools is None or tools == ""):
+        if has_tool_calls and (tools is None or tools == ""):
             errors.append(f"Missing tools for sample {s.get('id')}")
             break
 
