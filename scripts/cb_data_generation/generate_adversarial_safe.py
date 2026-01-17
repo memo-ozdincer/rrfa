@@ -20,7 +20,7 @@ Usage:
         --b4-data data/fujitsu/orchestrator_attacks_combined_deduplicated.jsonl \
         --tool-schema configs/tool_schemas/b4_standard_v1.json \
         --model meta-llama/Llama-3.1-8B-Instruct \
-        --output data/circuit_breakers/retain/b4_adversarial_safe.jsonl \
+        --output data/circuit_breakers/retain/adversarial_safe.jsonl \
         --target-n 500 \
         --temperature 0.1
 
@@ -498,7 +498,7 @@ def main():
     parser.add_argument(
         "--output",
         type=Path,
-        default=BASE_DIR / "data/circuit_breakers/retain/b4_adversarial_safe.jsonl",
+        default=BASE_DIR / "data/circuit_breakers/retain/adversarial_safe.jsonl",
         help="Output path for adversarial-safe samples",
     )
     parser.add_argument(

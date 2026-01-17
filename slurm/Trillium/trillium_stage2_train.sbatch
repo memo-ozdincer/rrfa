@@ -58,7 +58,7 @@ DATA_DIR="$SCRATCH_DIR/cb_mvp_data"
 CB_DATA_DIR="$PROJECT_DIR/data/circuit_breakers"
 
 # Stage 2 merged data file (created by merge_stage2_data.py)
-MERGED_FILE="$CB_DATA_DIR/stage2_training.jsonl"
+MERGED_FILE="$CB_DATA_DIR/stage2/train.jsonl"
 
 # Fallback to individual files if merged not available
 DS_FILE="$DATA_DIR/ds_stage2.jsonl"

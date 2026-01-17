@@ -136,8 +136,8 @@ class CircuitBreakerConfigLlama3_8B(CircuitBreakerConfig):
         target_layers=list(range(0, 21))
     ))
     alpha_max: float = 10.0
-    total_steps: int = 150
-    learning_rate: float = 5e-5
+    total_steps: int = 300
+    learning_rate: float = 3e-5
 
 
 @dataclass
@@ -212,7 +212,7 @@ class CircuitBreakerConfigLlama3_1_8B_Stage2(CircuitBreakerConfig):
     retain_weight_adversarial_safe: float = 2.0
     
     # Data path for Stage 2 (merged with 5:1 Dr:Ds ratio)
-    data_path: str = "data/circuit_breakers/stage2_training.jsonl"
+    data_path: str = "data/circuit_breakers/stage2/train.jsonl"
     
     # Logging
     wandb_run_name: Optional[str] = "cb-llama3.1-8b-stage2"

@@ -28,6 +28,7 @@ import argparse
 import json
 import logging
 import random
+import hashlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -102,12 +103,76 @@ def normalize_sample(sample: Dict[str, Any], split: str, source: str) -> Dict[st
     # Set split and source
     sample["metadata"]["split"] = split
     sample["metadata"]["source"] = source
-    
+
     # Ensure labels exists
     if "labels" not in sample:
         sample["labels"] = {}
+
+    # Ensure labels split is set
+    if "split" not in sample["labels"]:
+        sample["labels"]["split"] = split
+
+    # Tool-call marker
+    assistant_raw = sample.get("assistant_raw", "")
+    sample["metadata"]["has_tool_calls"] = "<|python_tag|>" in assistant_raw
     
     return sample
+
+
+def deduplicate_samples(samples: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
+    """Deduplicate samples by id (preferred) or content hash."""
+    seen = set()
+    unique = []
+    dupes = 0
+
+    for s in samples:
+        sample_id = s.get("id")
+        if not sample_id:
+            payload = json.dumps(
+                {
+                    "messages": s.get("messages"),
+                    "assistant_raw": s.get("assistant_raw"),
+                },
+                sort_keys=True,
+            )
+            sample_id = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+            s["id"] = f"auto_{sample_id}"
+
+        if sample_id in seen:
+            dupes += 1
+            continue
+        seen.add(sample_id)
+        unique.append(s)
+
+    return unique, dupes
+
+
+def load_samples_from_dir(
+    data_dir: Path,
+    split: str,
+    max_per_source: Optional[int] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """Load and normalize all JSONL files in a directory."""
+    all_samples: List[Dict[str, Any]] = []
+    source_counts: Dict[str, int] = {}
+
+    if not data_dir.exists():
+        logger.warning(f"Directory not found: {data_dir}")
+        return all_samples, source_counts
+
+    for path in sorted(data_dir.glob("*.jsonl")):
+        source_name = path.stem
+        samples = load_jsonl(path, max_per_source)
+        valid_samples = []
+        for s in samples:
+            if validate_sample(s):
+                normalized = normalize_sample(s, split, source_name)
+                valid_samples.append(normalized)
+        all_samples.extend(valid_samples)
+        source_counts[source_name] = len(valid_samples)
+        logger.info(f"  {source_name}: {len(valid_samples)} samples")
+
+    return all_samples, source_counts
 
 
 # =============================================================================
@@ -227,6 +292,8 @@ def collect_retain_data(base_dir: Path, max_per_source: Optional[int] = None) ->
                     # Add weight to metadata
                     normalized["metadata"]["weight"] = weight
                     normalized["metadata"]["priority"] = source["priority"]
+                    if "priority_class" not in normalized.get("labels", {}):
+                        normalized.setdefault("labels", {})["priority_class"] = source_name
                     valid_samples.append(normalized)
             
             all_samples.extend(valid_samples)
@@ -320,6 +387,74 @@ def merge_with_ratio(
     return merged
 
 
+def split_train_eval(
+    samples: List[Dict[str, Any]],
+    eval_fraction: float,
+    seed: int,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Split samples into train/eval sets."""
+    if eval_fraction <= 0:
+        return samples, []
+
+    rng = random.Random(seed)
+    indices = list(range(len(samples)))
+    rng.shuffle(indices)
+    n_eval = int(len(samples) * eval_fraction)
+    eval_idx = set(indices[:n_eval])
+
+    train_samples = [s for i, s in enumerate(samples) if i not in eval_idx]
+    eval_samples = [s for i, s in enumerate(samples) if i in eval_idx]
+
+    return train_samples, eval_samples
+
+
+def validate_merge(
+    harmful_samples: List[Dict[str, Any]],
+    retain_samples: List[Dict[str, Any]],
+    merged_samples: List[Dict[str, Any]],
+    min_ratio: float = 4.0,
+    min_adv_safe: int = 400,
+) -> Tuple[bool, List[str]]:
+    """Validate merged dataset against Stage 2 gates."""
+    errors = []
+
+    # Ratio check
+    harmful_count = sum(1 for s in merged_samples if s.get("labels", {}).get("split") == "harmful")
+    retain_count = sum(1 for s in merged_samples if s.get("labels", {}).get("split") == "retain")
+    ratio = retain_count / max(1, harmful_count)
+    if ratio < min_ratio:
+        errors.append(f"Dr:Ds ratio {ratio:.2f} < {min_ratio}")
+
+    # Adversarial-safe count check
+    adv_safe = sum(
+        1 for s in retain_samples
+        if s.get("labels", {}).get("is_adversarial_safe") is True
+    )
+    if adv_safe < min_adv_safe:
+        errors.append(f"Adversarial-safe count {adv_safe} < {min_adv_safe}")
+
+    # Duplicate IDs check
+    ids = [s.get("id") for s in merged_samples if s.get("id")]
+    if len(ids) != len(set(ids)):
+        errors.append("Duplicate IDs found after merge")
+
+    # Tools presence check for tool samples
+    for s in merged_samples:
+        labels = s.get("labels", {})
+        priority_class = labels.get("priority_class")
+        split = labels.get("split")
+        tools = s.get("tools")
+        tool_optional = (
+            split == "retain" and
+            priority_class == "general_conversation"
+        )
+        if not tool_optional and (tools is None or tools == ""):
+            errors.append(f"Missing tools for sample {s.get('id')}")
+            break
+
+    return len(errors) == 0, errors
+
+
 def compute_statistics(samples: List[Dict]) -> Dict[str, Any]:
     """Compute statistics for the merged dataset."""
     stats = {
@@ -367,8 +502,32 @@ def main():
     parser.add_argument(
         "--output",
         type=Path,
-        default=BASE_DIR / "data/circuit_breakers/stage2_training.jsonl",
+        default=BASE_DIR / "data/circuit_breakers/stage2/train.jsonl",
         help="Output path for merged training data",
+    )
+    parser.add_argument(
+        "--eval-output",
+        type=Path,
+        default=None,
+        help="Output path for eval split JSONL",
+    )
+    parser.add_argument(
+        "--eval-fraction",
+        type=float,
+        default=0.0,
+        help="Fraction of merged data to reserve for eval",
+    )
+    parser.add_argument(
+        "--harmful-dir",
+        type=Path,
+        default=None,
+        help="Directory containing harmful JSONL files",
+    )
+    parser.add_argument(
+        "--retain-dir",
+        type=Path,
+        default=None,
+        help="Directory containing retain JSONL files",
     )
     parser.add_argument(
         "--dr-ratio",
@@ -399,6 +558,11 @@ def main():
         default=None,
         help="Output path for statistics JSON",
     )
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="Run Stage 2 merge validation gates",
+    )
     
     args = parser.parse_args()
     
@@ -408,15 +572,25 @@ def main():
     
     # Collect harmful data
     logger.info("\nCollecting harmful (Ds) data:")
-    harmful_samples, harmful_counts = collect_harmful_data(
-        BASE_DIR, args.max_per_source
-    )
+    if args.harmful_dir:
+        harmful_samples, harmful_counts = load_samples_from_dir(
+            args.harmful_dir, "harmful", args.max_per_source
+        )
+    else:
+        harmful_samples, harmful_counts = collect_harmful_data(
+            BASE_DIR, args.max_per_source
+        )
     
     # Collect retain data
     logger.info("\nCollecting retain (Dr) data:")
-    retain_samples, retain_counts = collect_retain_data(
-        BASE_DIR, args.max_per_source
-    )
+    if args.retain_dir:
+        retain_samples, retain_counts = load_samples_from_dir(
+            args.retain_dir, "retain", args.max_per_source
+        )
+    else:
+        retain_samples, retain_counts = collect_retain_data(
+            BASE_DIR, args.max_per_source
+        )
     
     if not harmful_samples:
         logger.error("No harmful samples found! Run data generation scripts first.")
@@ -426,6 +600,13 @@ def main():
         logger.error("No retain samples found! Run data generation scripts first.")
         return 1
     
+    # Deduplicate
+    harmful_samples, harmful_dupes = deduplicate_samples(harmful_samples)
+    retain_samples, retain_dupes = deduplicate_samples(retain_samples)
+    if harmful_dupes > 0 or retain_dupes > 0:
+        logger.info(f"Deduplicated harmful: {harmful_dupes} duplicates removed")
+        logger.info(f"Deduplicated retain: {retain_dupes} duplicates removed")
+
     # Merge with ratio
     merged = merge_with_ratio(
         harmful_samples,
@@ -434,28 +615,62 @@ def main():
         shuffle=not args.no_shuffle,
         seed=args.seed,
     )
+
+    # Train/eval split
+    train_samples, eval_samples = split_train_eval(
+        merged,
+        eval_fraction=args.eval_fraction,
+        seed=args.seed,
+    )
     
     # Compute statistics
-    stats = compute_statistics(merged)
+    stats = compute_statistics(train_samples)
     stats["harmful_sources"] = harmful_counts
     stats["retain_sources"] = retain_counts
     stats["dr_ratio_target"] = args.dr_ratio
+    stats["eval_fraction"] = args.eval_fraction
     
     # Create output directory
     args.output.parent.mkdir(parents=True, exist_ok=True)
     
-    # Save merged data
+    # Save merged data (train)
     with open(args.output, "w", encoding="utf-8") as f:
-        for sample in merged:
+        for sample in train_samples:
             f.write(json.dumps(sample, ensure_ascii=False) + "\n")
-    
-    logger.info(f"\nSaved {len(merged)} samples to {args.output}")
+
+    logger.info(f"\nSaved {len(train_samples)} samples to {args.output}")
+
+    # Save eval data
+    if args.eval_output and eval_samples:
+        args.eval_output.parent.mkdir(parents=True, exist_ok=True)
+        with open(args.eval_output, "w", encoding="utf-8") as f:
+            for sample in eval_samples:
+                f.write(json.dumps(sample, ensure_ascii=False) + "\n")
+        logger.info(f"Saved {len(eval_samples)} eval samples to {args.eval_output}")
     
     # Save statistics
-    if args.stats_output:
-        with open(args.stats_output, "w", encoding="utf-8") as f:
+    stats_output = args.stats_output
+    if stats_output is None and args.output.parent.name == "stage2":
+        stats_output = args.output.parent / "stats.json"
+    if stats_output:
+        with open(stats_output, "w", encoding="utf-8") as f:
             json.dump(stats, f, indent=2)
-        logger.info(f"Saved statistics to {args.stats_output}")
+        logger.info(f"Saved statistics to {stats_output}")
+
+    # Validate merge gates
+    if args.validate:
+        ok, errors = validate_merge(
+            harmful_samples,
+            retain_samples,
+            train_samples,
+            min_ratio=4.0,
+            min_adv_safe=400,
+        )
+        if not ok:
+            logger.error("Merge validation failed:")
+            for err in errors:
+                logger.error(f"  - {err}")
+            return 1
     
     # Print summary
     logger.info("\n" + "=" * 60)
