@@ -851,8 +851,10 @@ class CircuitBreakerDataset(Dataset):
             # Tokenize prompt portion to find split point
             prompt_text = text[:completion_start_char]
             try:
+                # Use add_special_tokens=False to align with full-text tokenization
+                # (text already contains special tokens from chat template)
                 prompt_tokens = self.tokenizer.encode(
-                    prompt_text, add_special_tokens=True
+                    prompt_text, add_special_tokens=False
                 )
                 prompt_len = len(prompt_tokens)
             except Exception:

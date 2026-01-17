@@ -52,10 +52,14 @@ def build_batches(
     benign: List[Dict[str, Any]],
     benign_per_harmful: int,
     seed: int,
+    max_harmful: int | None,
 ) -> List[Dict[str, Any]]:
     random.seed(seed)
     random.shuffle(harmful)
     random.shuffle(benign)
+
+    if max_harmful is not None:
+        harmful = harmful[:max_harmful]
 
     if not harmful:
         raise ValueError("No harmful samples provided.")
@@ -87,6 +91,7 @@ def main() -> None:
     parser.add_argument("--input", type=Path, required=True, help="Stage 2 flat JSONL input")
     parser.add_argument("--output", type=Path, required=True, help="Output cb_training_batches.jsonl")
     parser.add_argument("--benign-per-harmful", type=int, default=5, help="Dr samples per Ds sample")
+    parser.add_argument("--max-harmful", type=int, default=None, help="Limit number of harmful samples")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     args = parser.parse_args()
 
@@ -95,7 +100,13 @@ def main() -> None:
     harmful = [s for s in samples if s.get("labels", {}).get("split") == "harmful"]
     benign = [s for s in samples if s.get("labels", {}).get("split") == "retain"]
 
-    batches = build_batches(harmful, benign, args.benign_per_harmful, args.seed)
+    batches = build_batches(
+        harmful,
+        benign,
+        args.benign_per_harmful,
+        args.seed,
+        args.max_harmful,
+    )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8") as f:
