@@ -4,7 +4,6 @@
 #SBATCH --job-name=stage2_test_cpu
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=24
-#SBATCH --time=00:15:00
 #SBATCH --output=/scratch/memoozd/logs/%x_%j.out
 #SBATCH --error=/scratch/memoozd/logs/%x_%j.err
 
@@ -78,7 +77,6 @@ fi
 if [[ ! -f "$EVAL_FILE" ]]; then
   EVAL_FILE="data/circuit_breakers/stage2/eval.jsonl"
 fi
-
 echo "Using train file: $TRAIN_FILE"
 echo "Using eval file:  $EVAL_FILE"
 echo ""
@@ -117,8 +115,11 @@ fi
 # -----------------------------------------------------------------------------
 echo ""
 echo "=== TEST 2: Data Loading & Statistics ==="
+export TRAIN_FILE
+export EVAL_FILE
 python << 'PYEOF'
 import json
+import os
 from collections import Counter
 from pathlib import Path
 
@@ -156,8 +157,8 @@ def analyze_dataset(path):
 
     return len(samples)
 
-train_count = analyze_dataset("$TRAIN_FILE")
-eval_count = analyze_dataset("$EVAL_FILE")
+train_count = analyze_dataset(os.environ["TRAIN_FILE"])
+eval_count = analyze_dataset(os.environ["EVAL_FILE"])
 
 print(f"\n✅ Successfully loaded {train_count + eval_count} total samples")
 PYEOF
@@ -167,8 +168,10 @@ PYEOF
 # -----------------------------------------------------------------------------
 echo ""
 echo "=== TEST 3: Tokenization Check ==="
+export TRAIN_FILE
 python << 'PYEOF'
 import json
+import os
 from transformers import AutoTokenizer
 
 print("Loading tokenizer...")
@@ -178,7 +181,7 @@ tokenizer = AutoTokenizer.from_pretrained(
 )
 
 print("Testing tokenization on 5 samples...")
-with open("$TRAIN_FILE") as f:
+with open(os.environ["TRAIN_FILE"]) as f:
     for i, line in enumerate(f):
         if i >= 5:
             break
