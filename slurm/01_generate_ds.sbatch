@@ -77,7 +77,7 @@ mkdir -p "$DATA_DIR"
 python src/data_generation/generate_ds_mvp.py \
     --b4-data data/fujitsu/orchestrator_attacks_combined_deduplicated.jsonl \
     --tool-schema configs/tool_schemas/b4_standard_v1.json \
-    --model mlabonne/Meta-Llama-3.1-8B-Instruct \
+    --model meta-llama/Llama-3.1-8B-Instruct \
     --backend vllm \
     --tensor-parallel 4 \
     --batch-size 64 \
