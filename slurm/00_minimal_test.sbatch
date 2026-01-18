@@ -29,7 +29,7 @@ set -euo pipefail
 
 PROJECT_DIR="/project/def-zhijing/memoozd"
 CB_SCRATCH="/scratch/memoozd/cb-scratch"
-REPO_DIR="$PROJECT_DIR/harmful-agents-meta-dataset"
+REPO_DIR="$PROJECT_DIR/rrfa-meta-dataset"
 VENV_DIR="$PROJECT_DIR/.venvs/cb_env"
 
 cd "$REPO_DIR"
