@@ -1,113 +1,81 @@
-# Harmful Agents Meta Dataset
+# Circuit Breakers for Agentic Safety
 
-Training data and pipelines for agent safety research: **Circuit Breakers** (Representation Rerouting) and **RLVR** (Reinforcement Learning with Verifiable Rewards).
-
----
-
-## Important Documentation for Robots
-
-| Document | Purpose |
-|----------|---------|
-| [**CIRCUIT_BREAKERS.md**](CIRCUIT_BREAKERS.md) | Complete Circuit Breaker training pipeline — theory, implementation, data, configuration |
-| [**RLVR.md**](RLVR.md) | Complete RLVR/GRPO training pipeline — verifiable rewards, data formats, training |
-| [**DATA.md**](DATA.md) | Comprehensive dataset inventory — all 7 datasets with schemas, paths, usage |
-
----
-
-## Quick Start
-
-### 1. Setup Environment
-
-```bash
-chmod +x scripts/hpc_setup.sh
-./scripts/hpc_setup.sh
-source cb_env/bin/activate
-```
-
-### 2. Download Data
-
-**WebArena Trajectories (optional):**
-```bash
-# Human trajectories
-gdown --folder https://drive.google.com/drive/folders/1NrN_sawtYK2V_uHnmmS8ugmGIKUAsPgt -O data/webarena/human_trajectories/
-
-# LLM trajectories
-gdown --folder https://drive.google.com/drive/folders/1H4wkzDkY2ufiC63DISMXllri0j-ipWcs -O data/webarena/llm_trajectories_v2/
-```
-
-**TAU2 Repository:**
-```bash
-git clone https://github.com/sierra-research/tau2-bench data/tau2_repo
-```
-
-### 3. Run Data Ingestion
-
-**For Circuit Breakers:**
-```bash
-python scripts/ingest_cb_data.py
-```
-
-**For RLVR:**
-```bash
-python scripts/ingest_rlvr_data.py
-```
-
-### 4. Train
-
-**Circuit Breakers (8 × H100):**
-```bash
-accelerate launch --num_processes 8 scripts/train_circuit_breaker.py \
-    --preset llama-4-scout \
-    --output-dir outputs/cb_llama4_scout
-```
-
----
-
-## Datasets
-
-| Dataset | Type | Records | Purpose |
-|---------|------|--------:|---------|
-| **AgentDojo** | Traces | 194 | Prompt injection attacks + benign tasks |
-| **Fujitsu** | Attacks | 36,192 | Confirmed successful attacks |
-| **AgentHarm** | Prompts | 476 | Harmful behavior prompts |
-| **WebArena** | Tasks | 812 | Web automation capability |
-| **TAU2** | Tasks | ~2,458 | Customer service agent tasks |
-| **AttackQA** | QA | 25,335 | Security knowledge (MITRE ATT&CK) |
-| **WebLINX** | Turns | 58,000 | Multi-turn web navigation |
-
-See [DATA.md](DATA.md) for complete details.
-
----
+This repository contains the pipeline for training and evaluating Circuit Breakers - a technique for making language models resist tool-flip attacks in agentic settings.
 
 ## Repository Structure
 
 ```
-harmful-agents-meta-dataset/
-├── CIRCUIT_BREAKERS.md          # CB pipeline reference
-├── RLVR.md                      # RLVR pipeline reference  
-├── DATA.md                      # Dataset inventory
-├── scripts/
-│   ├── ingest_cb_data.py        # CB data ingestion
-│   ├── ingest_rlvr_data.py      # RLVR data ingestion
-│   ├── train_circuit_breaker.py # CB training CLI
-│   ├── hpc_setup.sh             # Environment setup
-│   └── circuit_breakers/        # CB training modules
+├── configs/
+│   └── tool_schemas/
+│       └── b4_standard_v1.json     # Tool definitions for B4 attacks
 ├── data/
-│   ├── agent_dojo/              # AgentDojo traces
-│   ├── agent_harm/              # AgentHarm prompts
-│   ├── attackqa/                # AttackQA QA pairs
-│   ├── fujitsu/                 # Fujitsu attacks
-│   ├── webarena/                # WebArena tasks
-│   ├── tau2_repo/               # TAU2 benchmark
-│   └── circuit_breakers/        # OUTPUT: Processed CB data
-└── docs/
-    ├── weblinx_eval_procedure.md
-    └── agentharm_generation_procedure.md
+│   └── fujitsu/
+│       └── orchestrator_attacks_combined_deduplicated.jsonl  # Source attack data
+├── src/
+│   ├── data_generation/            # Data pipeline scripts
+│   │   ├── generate_ds_mvp.py      # Generate harmful set (Ds)
+│   │   ├── generate_dr_mvp.py      # Generate retain set (Dr)
+│   │   ├── create_eval_set.py      # Create held-out eval set
+│   │   ├── validate_format.py      # Validate Llama 3.1 format
+│   │   └── rebuild_training_data.py # Rebuild with proper format
+│   ├── training/                   # Training module
+│   │   ├── train.py                # Main training entry point
+│   │   ├── config.py               # Training configurations
+│   │   ├── trainer.py              # CircuitBreakerTrainer class
+│   │   └── hf_utils.py             # HuggingFace utilities
+│   ├── evaluation/                 # Evaluation scripts
+│   │   ├── eval_mvp.py             # MVP evaluation (ASR, capability)
+│   │   └── sanity_check.py         # Adapter sanity check
+│   └── utils/
+│       └── wandb_logging.py        # W&B logging utilities
+└── slurm/                          # SLURM batch scripts
+    ├── 01_generate_ds.sbatch       # Phase 1: Generate Ds
+    ├── 02_generate_dr.sbatch       # Phase 1: Generate Dr
+    ├── 03_create_eval.sbatch       # Phase 1: Create eval set
+    ├── 04_validate.sbatch          # Phase 2: Validate format
+    ├── 05_train.sbatch             # Phase 3: Train CB adapter
+    └── 06_eval.sbatch              # Phase 4: Evaluate
 ```
 
----
+## Pipeline
 
-## License
+The pipeline consists of 4 phases:
 
-This repository aggregates datasets with various licenses. See individual dataset documentation in [DATA.md](DATA.md) for licensing details.
+### Phase 1: Data Generation
+```bash
+sbatch slurm/01_generate_ds.sbatch   # Generate harmful set (Ds)
+# Wait for completion, then:
+sbatch slurm/02_generate_dr.sbatch   # Generate retain set (Dr)
+sbatch slurm/03_create_eval.sbatch   # Create eval set (can run in parallel with 02)
+```
 
+### Phase 2: Validation
+```bash
+sbatch slurm/04_validate.sbatch      # Validate Llama 3.1 format
+```
+
+### Phase 3: Training
+```bash
+sbatch slurm/05_train.sbatch         # Train Circuit Breaker adapter
+```
+
+### Phase 4: Evaluation
+```bash
+sbatch slurm/06_eval.sbatch          # Evaluate on held-out set
+```
+
+## Requirements
+
+See `requirements.txt` for Python dependencies. Key requirements:
+- PyTorch with CUDA support
+- Transformers
+- PEFT (for LoRA)
+- vLLM (for data generation)
+- Accelerate (for distributed training)
+
+## Stage 1 Gates
+
+The evaluation checks these criteria:
+- **ASR Relative Reduction ≥ 50%**: CB model reduces attack success rate
+- **Capability Retention > 85%**: Benign tool-calling preserved
+- **Output Difference > 10%**: CB model produces different outputs
