@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=mvp_train
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=4
+#SBATCH --gpus-per-node=1
 #SBATCH --time=03:00:00
 #SBATCH --output=/scratch/memoozd/cb-scratch/logs/%x_%j.out
 #SBATCH --error=/scratch/memoozd/cb-scratch/logs/%x_%j.err
@@ -120,7 +120,7 @@ echo "STAGE 6: Training (300 steps, 4 GPUs)"
 echo "========================================"
 
 # Run training with conservative hyperparameters
-accelerate launch --num_processes ${SLURM_GPUS_ON_NODE:-4} \
+accelerate launch --num_processes ${SLURM_GPUS_ON_NODE:-1} \
     src/training/train.py \
     --preset llama-3.1-8b-instruct \
     --base-model "$BASE_MODEL" \
