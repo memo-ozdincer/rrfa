@@ -1065,11 +1065,10 @@ class CircuitBreakerTrainer:
         return asdict(self.config)
     
     def _load_models(self):
-        """Load trainable model with LoRA adapters.
+        """Load trainable model with LoRA adapters and a separate frozen model.
 
-        Memory optimization: Instead of loading a separate frozen reference model,
-        we use the same model and toggle LoRA adapters on/off to get frozen
-        representations. This saves ~16GB per GPU for Llama-8B class models.
+        We keep the frozen model fully separate to avoid DDP parameter reuse
+        issues when doing multiple forward passes per step.
         """
         self.accelerator.print(f"Loading model: {self.config.base_model}")
 
@@ -1122,9 +1121,22 @@ class CircuitBreakerTrainer:
         self.model = get_peft_model(self.model, lora_config)
         self.model.print_trainable_parameters()
 
-        # No separate frozen model - we use adapter toggling instead
-        # to get frozen representations from the same model
-        self.frozen_model = None
+        # Load separate frozen model WITHOUT LoRA (kept outside DDP)
+        # Use same device_map policy as trainable model.
+        self.frozen_model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch_dtype,
+            device_map=device_map,
+            trust_remote_code=True,
+            token=hf_token,
+            local_files_only=offline_mode,
+        )
+        self.frozen_model.eval()
+        for param in self.frozen_model.parameters():
+            param.requires_grad = False
+
+        # Track how frozen model was placed for later device handling
+        self._frozen_device_map = device_map
     
     def _setup_data(self):
         """Setup dataset and dataloader."""
@@ -1185,17 +1197,18 @@ class CircuitBreakerTrainer:
         # with the same LoRA parameters. DDP by default expects parameters to be
         # used only once per backward pass. _set_static_graph() tells DDP that
         # our graph structure is static and it should not track parameter usage.
-        if self.accelerator.num_processes > 1:
-            unwrapped_model = self.accelerator.unwrap_model(self.model)
-            if hasattr(unwrapped_model, '_set_static_graph'):
-                unwrapped_model._set_static_graph()
-                self.accelerator.print("✓ Set static graph for DDP (multi-GPU training)")
+        if self.accelerator.num_processes > 1 and hasattr(self.model, '_set_static_graph'):
+            self.model._set_static_graph()
+            self.accelerator.print("✓ Set static graph for DDP (multi-GPU training)")
+
+        # Place frozen model on each device (no DDP wrapper)
+        if self.frozen_model is not None and self._frozen_device_map is None:
+            self.frozen_model = self.frozen_model.to(self.accelerator.device)
     
     def _setup_extractors(self):
         """Setup representation extractors.
 
-        Note: We use the same model for both trainable and frozen representations
-        by toggling LoRA adapters on/off, so we only need one extractor.
+        We keep separate extractors for trainable and frozen models.
         """
         method = (self.config.representation_extraction or "").strip().lower()
         if method not in {"hidden_states", "hooks"}:
@@ -1213,8 +1226,9 @@ class CircuitBreakerTrainer:
             self.model_extractor = RepresentationExtractor(
                 unwrapped_model, self.config.cb_target_layers
             )
-            # No separate frozen extractor - we reuse model_extractor with adapters disabled
-            self.frozen_extractor = None
+            self.frozen_extractor = RepresentationExtractor(
+                self.frozen_model, self.config.cb_target_layers
+            )
         else:
             # No hooks required.
             self.model_extractor = None
@@ -1308,9 +1322,6 @@ class CircuitBreakerTrainer:
         harmful_attention_mask = batch['harmful_attention_mask']
         harmful_loss_mask = batch.get('harmful_loss_mask', None)
 
-        # Get reference to underlying PEFT model for adapter toggling
-        unwrapped_model = self.accelerator.unwrap_model(self.model)
-
         if self._rep_extraction_method == "hooks":
             # Forward through trainable model (adapters enabled)
             _ = self.model(
@@ -1320,17 +1331,15 @@ class CircuitBreakerTrainer:
             )
             harmful_model_reps = self.model_extractor.get_representations()
 
-            # Forward through same model with adapters disabled (frozen behavior)
-            self.model_extractor.clear()
+            # Forward through frozen model (no grad)
+            self.frozen_extractor.clear()
             with torch.no_grad():
-                unwrapped_model.disable_adapter_layers()
-                _ = self.model(
+                _ = self.frozen_model(
                     input_ids=harmful_input_ids,
                     attention_mask=harmful_attention_mask,
                     use_cache=False,
                 )
-                unwrapped_model.enable_adapter_layers()
-            harmful_frozen_reps = self.model_extractor.get_representations()
+            harmful_frozen_reps = self.frozen_extractor.get_representations()
         else:
             outputs = self.model(
                 input_ids=harmful_input_ids,
@@ -1342,17 +1351,15 @@ class CircuitBreakerTrainer:
             harmful_model_reps = _select_hidden_states(outputs, self.config.cb_target_layers)
             del outputs
 
-            # Get frozen representations by disabling adapters
+            # Get frozen representations from separate frozen model
             with torch.no_grad():
-                unwrapped_model.disable_adapter_layers()
-                frozen_outputs = self.model(
+                frozen_outputs = self.frozen_model(
                     input_ids=harmful_input_ids,
                     attention_mask=harmful_attention_mask,
                     output_hidden_states=True,
                     use_cache=False,
                     return_dict=True,
                 )
-                unwrapped_model.enable_adapter_layers()
                 harmful_frozen_reps = _select_hidden_states(
                     frozen_outputs, self.config.cb_target_layers
                 )
@@ -1386,17 +1393,15 @@ class CircuitBreakerTrainer:
             )
             benign_model_reps = self.model_extractor.get_representations()
 
-            # Forward through same model with adapters disabled (frozen behavior)
-            self.model_extractor.clear()
+            # Forward through frozen model (no grad)
+            self.frozen_extractor.clear()
             with torch.no_grad():
-                unwrapped_model.disable_adapter_layers()
-                _ = self.model(
+                _ = self.frozen_model(
                     input_ids=benign_input_ids,
                     attention_mask=benign_attention_mask,
                     use_cache=False,
                 )
-                unwrapped_model.enable_adapter_layers()
-            benign_frozen_reps = self.model_extractor.get_representations()
+            benign_frozen_reps = self.frozen_extractor.get_representations()
         else:
             outputs = self.model(
                 input_ids=benign_input_ids,
@@ -1408,17 +1413,15 @@ class CircuitBreakerTrainer:
             benign_model_reps = _select_hidden_states(outputs, self.config.cb_target_layers)
             del outputs
 
-            # Get frozen representations by disabling adapters
+            # Get frozen representations from separate frozen model
             with torch.no_grad():
-                unwrapped_model.disable_adapter_layers()
-                frozen_outputs = self.model(
+                frozen_outputs = self.frozen_model(
                     input_ids=benign_input_ids,
                     attention_mask=benign_attention_mask,
                     output_hidden_states=True,
                     use_cache=False,
                     return_dict=True,
                 )
-                unwrapped_model.enable_adapter_layers()
                 benign_frozen_reps = _select_hidden_states(
                     frozen_outputs, self.config.cb_target_layers
                 )
