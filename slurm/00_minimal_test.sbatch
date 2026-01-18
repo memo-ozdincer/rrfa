@@ -103,7 +103,7 @@ python src/data_generation/generate_ds_mvp.py \
     --model "$BASE_MODEL" \
     --output "$DS_FILE" \
     --limit 10 \
-    --tensor-parallel-size 1 \
+    --tensor-parallel1 \
     --batch-size 4 \
     --min-yield 0.0
 
@@ -129,7 +129,7 @@ python src/data_generation/generate_dr_mvp.py \
     --tool-schema "$TOOL_SCHEMA" \
     --model "$BASE_MODEL" \
     --output "$DR_FILE" \
-    --tensor-parallel-size 1 \
+    --tensor-parallel1 \
     --batch-size 4
 
 if [[ ! -f "$DR_FILE" ]]; then
