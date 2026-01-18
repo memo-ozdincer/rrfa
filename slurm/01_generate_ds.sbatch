@@ -18,7 +18,7 @@
 # - Outputs in Llama 3.1 tool-calling format
 #
 # Submit from $SCRATCH:
-#   cd /scratch/memoozd/rrfa-meta-dataset
+#   cd /scratch/memoozd/rrfa
 #   sbatch slurm/01_generate_ds.sbatch
 #
 # =============================================================================
@@ -27,7 +27,7 @@ set -euo pipefail
 
 PROJECT_DIR="/project/def-zhijing/memoozd"
 CB_SCRATCH="/scratch/memoozd/cb-scratch"
-REPO_DIR="$PROJECT_DIR/rrfa-meta-dataset"
+REPO_DIR="$PROJECT_DIR/rrfa"
 VENV_DIR="$PROJECT_DIR/.venvs/cb_env"
 
 cd "$REPO_DIR"
