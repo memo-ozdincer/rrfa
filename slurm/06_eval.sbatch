@@ -83,7 +83,7 @@ fi
 echo "Eval data: $EVAL_DATA ($(wc -l < "$EVAL_DATA") samples)"
 
 # Run Evaluation
-python src/evaluation/eval_mvp.py \
+python src/evaluation/eval.py \
     --baseline "$BASE_MODEL" \
     --cb-adapter "$CB_ADAPTER" \
     --eval-data "$EVAL_DATA" \

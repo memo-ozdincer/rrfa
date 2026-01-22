@@ -74,7 +74,7 @@ echo "Model: mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated"
 DATA_DIR="$CB_SCRATCH/data"
 mkdir -p "$DATA_DIR"
 
-python src/data_generation/generate_ds_mvp.py \
+python src/data_generation/generate_ds.py \
     --b4-data data/fujitsu/orchestrator_attacks_combined_deduplicated.jsonl \
     --tool-schema configs/tool_schemas/b4_standard_v1.json \
     --model meta-llama/Llama-3.1-8B-Instruct \

@@ -27,7 +27,7 @@ Key fields:
 
 STAGE 1: GENERATE Ds (Harmful Set)
 ----------------------------------
-Script: src/data_generation/generate_ds_mvp.py
+Script: src/data_generation/generate_ds.py
 
 Takes raw records, runs them through abliterated Llama-3.1-8B, keeps only
 samples where the attack SUCCEEDS (model calls simulated_tool instead of
@@ -52,7 +52,7 @@ Output (ds_stage1.jsonl):
 
 STAGE 2: GENERATE Dr (Retain Set)
 ---------------------------------
-Script: src/data_generation/generate_dr_mvp.py
+Script: src/data_generation/generate_dr.py
 
 For each Ds sample, generates BENIGN completion using the CLEAN benign_query
 (without injection). This teaches the model what it SHOULD have done.

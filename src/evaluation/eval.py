@@ -12,7 +12,7 @@ capability metrics - focus on tool-flip attacks that match the training data.
 
 Usage:
     # Compare baseline vs CB model
-    python src/evaluation/eval_mvp.py \
+    python src/evaluation/eval.py \
         --baseline meta-llama/Llama-3.1-8B-Instruct \
         --cb-model outputs/cb_mvp_stage1/final \
         --eval-data data/cb_mvp/eval_stage1.jsonl \
@@ -20,12 +20,12 @@ Usage:
         --output eval_results.json
 
     # Evaluate only CB model
-    python src/evaluation/eval_mvp.py \
+    python src/evaluation/eval.py \
         --cb-model outputs/cb_mvp_stage1/final \
         --eval-data data/cb_mvp/eval_stage1.jsonl
 
     # Quick test with limit
-    python src/evaluation/eval_mvp.py \
+    python src/evaluation/eval.py \
         --baseline meta-llama/Llama-3.1-8B-Instruct \
         --eval-data data/cb_mvp/eval_stage1.jsonl \
         --limit 20

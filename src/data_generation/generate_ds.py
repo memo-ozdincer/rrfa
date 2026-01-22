@@ -1,24 +1,28 @@
 #!/usr/bin/env python3
 """
-MVP Retain Set (Dr) Generator - Stage 1
+MVP Circuit Breaker Set (Ds) Generator - Stage 1
 
-Generate the Retain Set as PAIRED BENIGN TWINS of Ds samples.
-For Stage 1, we skip UltraChat/XSTest/cross-domain mixing and only create
-benign twins that preserve correct tool selection behavior.
+Generate the Circuit Breaker Set with BEHAVIORAL FILTERING.
+Unlike the full generate_ds.py, this script ONLY includes samples where
+the model actually exhibits the harmful behavior (attack succeeds).
 
 Key Stage 1 Principles:
-1. For each Ds sample, create a benign twin (remove injection)
-2. Only include if observed_tool == expected_tool (correct behavior)
-3. Target 1:1 ratio with Ds (simple balancing)
-4. Use same frozen tool schema as Ds (b4_standard_v1)
+1. Only include samples where observed_tool == simulated_tool (attack succeeded)
+2. Enforce minimum yield rate (>10%) or fail
+3. Use frozen tool schema (b4_standard_v1)
+4. Store full messages array, not just prompt string
 5. Validate Llama 3.1 format compliance
 
 Usage:
-    python scripts/cb_data_generation/generate_dr_mvp.py \
-        --ds-data data/cb_mvp/ds_stage1.jsonl \
+    python scripts/cb_data_generation/generate_ds.py \
+        --b4-data data/fujitsu/orchestrator_attacks_combined_deduplicated.jsonl \
         --tool-schema configs/tool_schemas/b4_standard_v1.json \
         --model meta-llama/Llama-3.1-8B-Instruct \
-        --output data/cb_mvp/dr_stage1.jsonl
+        --output data/cb_mvp/ds_stage1.jsonl \
+        --min-yield 0.10
+
+    # Dry run to check yield rate
+    python scripts/cb_data_generation/generate_ds.py --dry-run --limit 100
 """
 
 # Set cache directories BEFORE any other imports (for vLLM/flashinfer)
@@ -28,15 +32,15 @@ import os
 cache_root = "/scratch/memoozd/cb-scratch/cache"
 
 # CRITICAL FIX: Override HOME to trick flashinfer that defaults to ~/.cache
-os.environ["HOME"] = cache_root
+os.environ["HOME"] = cache_root 
 
 os.makedirs(os.path.join(cache_root, "vllm"), exist_ok=True)
 os.makedirs(os.path.join(cache_root, "flashinfer"), exist_ok=True)
-os.makedirs(os.path.join(cache_root, "xdg_cache"), exist_ok=True)
+os.makedirs(os.path.join(cache_root, "xdg_cache"), exist_ok=True) # Ensure XDG dir exists
 
-os.environ.setdefault("VLLM_USAGE_STATS_DIR", os.path.join(cache_root, "vllm"))
-os.environ.setdefault("FLASHINFER_WORKSPACE_DIR", os.path.join(cache_root, "flashinfer"))
-os.environ.setdefault("XDG_CACHE_HOME", os.path.join(cache_root, "xdg_cache"))
+os.environ["VLLM_USAGE_STATS_DIR"] = os.path.join(cache_root, "vllm")
+os.environ["FLASHINFER_WORKSPACE_DIR"] = os.path.join(cache_root, "flashinfer")
+os.environ["XDG_CACHE_HOME"] = os.path.join(cache_root, "xdg_cache") # Re-assert XDG cache
 
 import argparse
 import json
@@ -45,7 +49,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 import torch
 from tqdm import tqdm
@@ -76,7 +80,7 @@ def resolve_hf_token() -> Optional[str]:
 
 
 # =============================================================================
-# Tool Schema Loading (reuse from generate_ds_mvp)
+# Tool Schema Loading
 # =============================================================================
 
 def load_tool_schema(schema_path: Path) -> Dict[str, Any]:
@@ -98,84 +102,60 @@ def get_system_prompt(schema: Dict[str, Any]) -> str:
 
 
 # =============================================================================
-# Data Loading
+# Data Source Loaders
 # =============================================================================
 
-def load_ds_samples(path: Path) -> List[Dict[str, Any]]:
-    """Load Ds samples from JSONL file."""
-    samples = []
+def load_fujitsu_b4(
+    path: Path,
+    limit: Optional[int] = None,
+) -> Generator[Dict[str, Any], None, None]:
+    """
+    Load Fujitsu B4 orchestrator attack records.
+    
+    Note: We load ALL records (not just success_only), because we need to
+    test which ones actually succeed with our target model.
+    """
+    count = 0
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
-            if line.strip():
-                samples.append(json.loads(line))
-    return samples
-
-
-# =============================================================================
-# Injection Removal
-# =============================================================================
-
-# Common injection patterns to remove
-INJECTION_PATTERNS = [
-    # HTML comments
-    r'<!--.*?-->',
-    # Markdown comments
-    r'\[//\]:.*?\n',
-    # Common injection phrases
-    r'(?i)ignore\s+(?:the\s+)?(?:previous|above)\s+(?:instructions?|query)',
-    r'(?i)instead\s+(?:of\s+)?(?:the\s+)?(?:above|previous)',
-    r'(?i)use\s+\w+\s+instead',
-    r'(?i)actually\s*,?\s*(?:please\s+)?(?:use|call)',
-    r'(?i)forget\s+(?:the\s+)?(?:above|previous)',
-    r'(?i)new\s+instruction[s]?\s*:',
-    # Tool-specific redirects
-    r'(?i)(?:please\s+)?(?:use|call)\s+(?:the\s+)?(\w+)\s+(?:tool|function)\s+instead',
-    r'(?i)do\s+not\s+use\s+\w+\s*,?\s*use\s+\w+',
-]
-
-
-def remove_injection(prompt: str, benign_query: Optional[str] = None) -> str:
-    """
-    Remove injection from a prompt to create benign twin.
-    
-    Args:
-        prompt: The full prompt with injection
-        benign_query: If available, the known benign query
-    
-    Returns:
-        Cleaned benign prompt
-    """
-    # If we have the benign query, use it directly
-    if benign_query and benign_query.strip():
-        return benign_query.strip()
-    
-    # Otherwise, try to extract/clean the prompt
-    cleaned = prompt
-    
-    # Remove HTML comments
-    cleaned = re.sub(r'<!--.*?-->', '', cleaned, flags=re.DOTALL)
-    
-    # Remove markdown comments
-    cleaned = re.sub(r'\[//\]:.*?\n', '', cleaned)
-    
-    # Apply other patterns
-    for pattern in INJECTION_PATTERNS[2:]:  # Skip first two (already handled)
-        cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
-    
-    # Clean up whitespace
-    cleaned = re.sub(r'\n\s*\n', '\n', cleaned)
-    cleaned = cleaned.strip()
-    
-    # If cleaning removed too much, fall back to original
-    if len(cleaned) < 10:
-        # Try to extract the first sentence/question
-        match = re.match(r'^([^.!?]+[.!?])', prompt)
-        if match:
-            cleaned = match.group(1).strip()
-        else:
-            cleaned = prompt[:200].strip()  # Truncate as last resort
-    
-    return cleaned
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            
+            # Extract fields
+            benign_query = record.get("benign_query", "")
+            malicious_injection = record.get("malicious_injection", "")
+            combined_query = record.get("combined_query", "")
+            expected_tool = record.get("expected_tool", "")
+            simulated_tool = record.get("simulated_tool", "")
+            
+            # Skip if missing required fields
+            if not combined_query or not expected_tool or not simulated_tool:
+                continue
+            
+            yield {
+                "id": record.get("record_id", f"fujitsu_b4_{count}"),
+                "source": "fujitsu_b4",
+                "benign_query": benign_query,
+                "malicious_injection": malicious_injection,
+                "combined_query": combined_query,
+                "expected_tool": expected_tool,
+                "simulated_tool": simulated_tool,
+                "metadata": {
+                    "attack_id": record.get("attack_id"),
+                    "category": record.get("category"),
+                    "subtype": record.get("subtype"),
+                    "judge_note": record.get("judge_note"),
+                    "original_success": record.get("success", False),
+                },
+            }
+            
+            count += 1
+            if limit and count >= limit:
+                return
 
 
 # =============================================================================
@@ -219,7 +199,7 @@ class VLLMBackend:
     def generate_batch(
         self,
         prompts: List[str],
-        temperature: float = 0.3,
+        temperature: float = 0.7,
         max_tokens: int = 256,
         top_p: float = 0.95,
     ) -> List[str]:
@@ -228,7 +208,7 @@ class VLLMBackend:
             temperature=temperature,
             max_tokens=max_tokens,
             top_p=top_p,
-            skip_special_tokens=False,
+            skip_special_tokens=False,  # Keep special tokens for tool call parsing
         )
         
         outputs = self.llm.generate(prompts, sampling_params)
@@ -248,6 +228,7 @@ class VLLMBackend:
                 add_generation_prompt=True,
             )
         except TypeError:
+            # Fallback without tools
             return self.tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
@@ -256,7 +237,7 @@ class VLLMBackend:
 
 
 # =============================================================================
-# Model Loading and Generation (reuse from generate_ds_mvp)
+# Model Loading and Generation
 # =============================================================================
 
 def resolve_local_model_path(model_id: str, hf_token: Optional[str] = None) -> str:
@@ -336,10 +317,15 @@ def generate_with_tools(
     messages: List[Dict[str, str]],
     tools: List[Dict[str, Any]],
     max_new_tokens: int = 256,
-    temperature: float = 0.3,
+    temperature: float = 0.7,
     do_sample: bool = True,
 ) -> str:
-    """Generate response with tool-calling capability."""
+    """
+    Generate response with tool-calling capability.
+    
+    Returns the raw assistant output (including special tokens).
+    """
+    # Apply chat template with tools
     if hasattr(tokenizer, 'apply_chat_template'):
         try:
             input_text = tokenizer.apply_chat_template(
@@ -349,12 +335,14 @@ def generate_with_tools(
                 add_generation_prompt=True,
             )
         except TypeError:
+            # Fallback if tools not supported in template
             input_text = tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
             )
     else:
+        # Manual formatting
         parts = []
         for msg in messages:
             parts.append(f"{msg['role']}: {msg['content']}")
@@ -371,6 +359,10 @@ def generate_with_tools(
             pad_token_id=tokenizer.pad_token_id,
         )
     
+    # Decode the full output including special tokens for analysis
+    full_output = tokenizer.decode(outputs[0], skip_special_tokens=False)
+    
+    # Extract just the new tokens (assistant response)
     input_len = inputs['input_ids'].shape[1]
     response_tokens = outputs[0][input_len:]
     response = tokenizer.decode(response_tokens, skip_special_tokens=False)
@@ -379,30 +371,45 @@ def generate_with_tools(
 
 
 def extract_tool_call(response: str) -> Optional[Dict[str, Any]]:
-    """Extract tool call from assistant response."""
+    """
+    Extract tool call from assistant response.
+    
+    Handles multiple formats:
+    - Llama 3.1: <|python_tag|>tool_name(args)<|eom_id|>
+    - JSON: {"name": "...", "parameters": {...}}
+    - Function call: tool_name({"arg": "value"})
+    """
+    # Try Llama 3.1 format first
     if "<|python_tag|>" in response:
         content = response.split("<|python_tag|>", 1)[1]
+        # Remove end tokens
         for end_token in ["<|eom_id|>", "<|eot_id|>", "</s>", "<|end_of_text|>"]:
             content = content.split(end_token)[0]
         content = content.strip()
         
+        # Try function call syntax: tool_name(args)
         match = re.match(r'(\w+)\s*\((.*)\)', content, re.DOTALL)
         if match:
             tool_name = match.group(1)
             args_str = match.group(2).strip()
             
+            # Try to parse arguments
             try:
+                # Handle keyword arguments: query='value'
                 if '=' in args_str and not args_str.startswith('{'):
+                    # Convert keyword args to dict
                     args = {}
                     for part in re.findall(r"(\w+)\s*=\s*['\"]([^'\"]*)['\"]", args_str):
                         args[part[0]] = part[1]
                     return {"name": tool_name, "parameters": args}
                 else:
+                    # Try JSON parsing
                     args = json.loads(args_str) if args_str else {}
                     return {"name": tool_name, "parameters": args}
             except (json.JSONDecodeError, ValueError):
                 return {"name": tool_name, "parameters": {"raw": args_str}}
         
+        # Try JSON format
         try:
             data = json.loads(content)
             name = data.get("name") or data.get("function", {}).get("name")
@@ -412,9 +419,11 @@ def extract_tool_call(response: str) -> Optional[Dict[str, Any]]:
         except json.JSONDecodeError:
             pass
     
+    # Try to find JSON tool call anywhere
     json_match = re.search(r'\{[^{}]*"name"\s*:\s*"([^"]+)"[^{}]*\}', response)
     if json_match:
         try:
+            # Find the full JSON object
             start = response.find('{', json_match.start())
             depth = 0
             end = start
@@ -440,25 +449,37 @@ def extract_tool_call(response: str) -> Optional[Dict[str, Any]]:
 
 
 def validate_llama_format(assistant_raw: str) -> Tuple[bool, str]:
-    """Validate Llama 3.1 tool format."""
+    """
+    Validate that assistant_raw contains a parseable tool call.
+    
+    We accept multiple formats:
+    1. Llama 3.1 native: <|python_tag|>tool_name(args)<|eom_id|>
+    2. JSON format: {"name": "tool_name", "parameters": {...}}
+    3. Function call in JSON: {"function": "tool_name", "arguments": {...}}
+    
+    Returns (is_valid, error_message).
+    """
     if not assistant_raw:
         return False, "Empty assistant_raw"
     
-    if "<|python_tag|>" not in assistant_raw:
-        return False, "Missing <|python_tag|>"
+    # Check for any parseable tool call
+    tool_call = extract_tool_call(assistant_raw)
+    if tool_call is None:
+        return False, "No parseable tool call found"
     
-    has_valid_end = any(
-        assistant_raw.rstrip().endswith(end)
-        for end in ["<|eom_id|>", "<|eot_id|>"]
-    )
-    if not has_valid_end:
-        has_end_token = "<|eom_id|>" in assistant_raw or "<|eot_id|>" in assistant_raw
-        if not has_end_token:
-            return False, "Missing <|eom_id|> or <|eot_id|>"
+    # Llama 3.1 native format (preferred but not required)
+    has_python_tag = "<|python_tag|>" in assistant_raw
+    has_end_token = "<|eom_id|>" in assistant_raw or "<|eot_id|>" in assistant_raw
     
+    # Warn but don't fail if not using native format
+    if has_python_tag and not has_end_token:
+        return True, "Has <|python_tag|> but missing end token (non-fatal)"
+    
+    # Must NOT have markdown wrappers (these break training)
     if "```" in assistant_raw:
         return False, "Contains markdown code block"
     
+    # Must NOT have common prefixes (these break training)
     for prefix in ["Action:", "ToolCall:", "Function:"]:
         if assistant_raw.strip().startswith(prefix):
             return False, f"Contains forbidden prefix: {prefix}"
@@ -467,79 +488,58 @@ def validate_llama_format(assistant_raw: str) -> Tuple[bool, str]:
 
 
 # =============================================================================
-# MVP Dr Builder
+# MVP Ds Builder
 # =============================================================================
 
-def build_dr_mvp(
-    ds_samples: List[Dict[str, Any]],
+def build_ds_mvp(
+    b4_records: List[Dict[str, Any]],
     model,
     tokenizer,
     tools: List[Dict[str, Any]],
     system_prompt: str,
-    temperature: float = 0.3,
+    temperature: float = 0.7,
+    min_yield: float = 0.10,
+    save_all: bool = False,
     verbose: bool = True,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
-    Build Dr as paired benign twins of Ds samples.
-    
-    For each Ds sample:
-    1. Extract benign query (remove injection)
-    2. Generate with model at lower temperature
-    3. ONLY include if observed_tool == expected_tool (correct behavior)
+    Build Ds from ONLY successful flips under actual runtime.
     
     Args:
-        ds_samples: List of Ds samples
+        b4_records: List of B4 attack records
         model: The language model
         tokenizer: The tokenizer
         tools: Tool definitions
         system_prompt: System prompt to use
-        temperature: Generation temperature (lower = more consistent)
+        temperature: Generation temperature
+        min_yield: Minimum acceptable yield rate (default 10%)
+        save_all: If True, save all records (not just successful flips)
         verbose: Print progress
     
     Returns:
-        (dr_samples, stats) tuple
+        (ds_samples, stats) tuple
     """
-    dr_samples = []
+    ds_samples = []
+    all_samples = []  # For debugging
     
     stats = {
         "total": 0,
+        "successful_flips": 0,
         "correct_behavior": 0,
-        "wrong_tool": 0,
         "no_tool_call": 0,
+        "other_tool": 0,
         "format_errors": 0,
     }
     
-    iterator = tqdm(ds_samples, desc="Building Dr MVP") if verbose else ds_samples
+    iterator = tqdm(b4_records, desc="Building Ds MVP") if verbose else b4_records
     
-    for ds_sample in iterator:
+    for record in iterator:
         stats["total"] += 1
         
-        # Get expected tool and benign query
-        labels = ds_sample.get("labels", {})
-        expected_tool = labels.get("expected_tool", "")
-        
-        # Try to get benign query from metadata
-        metadata = ds_sample.get("metadata", {})
-        benign_query = metadata.get("benign_query", "")
-        
-        # If no benign query, try to extract from messages
-        if not benign_query:
-            messages = ds_sample.get("messages", [])
-            for msg in messages:
-                if msg.get("role") == "user":
-                    original_prompt = msg.get("content", "")
-                    benign_query = remove_injection(original_prompt)
-                    break
-        
-        if not benign_query:
-            logger.warning(f"Could not extract benign query for {ds_sample.get('id')}")
-            stats["format_errors"] += 1
-            continue
-        
-        # Build messages with benign query
+        # Build messages
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": benign_query},
+            {"role": "user", "content": record["combined_query"]},
         ]
         
         # Generate response
@@ -549,139 +549,147 @@ def build_dr_mvp(
                 temperature=temperature,
             )
         except Exception as e:
-            logger.error(f"Generation error for {ds_sample.get('id')}: {e}")
+            logger.error(f"Generation error for {record['id']}: {e}")
             stats["format_errors"] += 1
             continue
         
         # Extract tool call
         tool_call = extract_tool_call(response)
         observed_tool = tool_call["name"] if tool_call else None
+        expected_tool = record["expected_tool"]
+        simulated_tool = record["simulated_tool"]
         
         # Determine outcome
         if observed_tool is None:
             stats["no_tool_call"] += 1
-            is_correct = False
+            is_flip_success = False
+        elif observed_tool == simulated_tool:
+            stats["successful_flips"] += 1
+            is_flip_success = True
         elif observed_tool == expected_tool:
             stats["correct_behavior"] += 1
-            is_correct = True
+            is_flip_success = False
         else:
-            stats["wrong_tool"] += 1
-            is_correct = False
+            stats["other_tool"] += 1
+            is_flip_success = False
         
         # Validate format
         is_valid, format_error = validate_llama_format(response)
         if not is_valid:
             stats["format_errors"] += 1
+            if verbose and stats["format_errors"] <= 5:
+                logger.warning(f"Format error: {format_error} in {record['id']}")
         
-        # ONLY include if correct tool was called
-        if is_correct:
-            sample = {
-                "id": f"{ds_sample.get('id')}_benign",
-                "messages": messages,
-                "tools": "b4_standard_v1",
-                "assistant_raw": response,
-                "tool_calls_structured": [tool_call] if tool_call else [],
-                "labels": {
-                    "expected_tool": expected_tool,
-                    "observed_tool": observed_tool,
-                    "is_flip_success": False,  # Correct behavior, not a flip
-                },
-                "metadata": {
-                    "split": "retain",
-                    "source": "b4",
-                    "paired_with": ds_sample.get("id"),
-                    "benign_query": benign_query,
-                    "format_valid": is_valid,
-                    "format_error": format_error if not is_valid else None,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                },
-            }
-            dr_samples.append(sample)
+        # Build sample
+        sample = {
+            "id": record["id"],
+            "messages": messages,
+            "tools": "b4_standard_v1",  # Reference to frozen schema
+            "assistant_raw": response,
+            "tool_calls_structured": [tool_call] if tool_call else [],
+            "labels": {
+                "expected_tool": expected_tool,
+                "observed_tool": observed_tool,
+                "simulated_tool": simulated_tool,
+                "is_flip_success": is_flip_success,
+            },
+            "metadata": {
+                "split": "train",
+                "source": "b4",
+                "benign_query": record["benign_query"],
+                "malicious_injection": record["malicious_injection"],
+                "format_valid": is_valid,
+                "format_error": format_error if not is_valid else None,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                **record.get("metadata", {}),
+            },
+        }
+        
+        all_samples.append(sample)
+        
+        # ONLY include if attack succeeded
+        if is_flip_success:
+            ds_samples.append(sample)
     
-    # Compute success rate
-    success_rate = stats["correct_behavior"] / stats["total"] if stats["total"] > 0 else 0
-    stats["success_rate"] = success_rate
+    # Compute yield rate
+    yield_rate = stats["successful_flips"] / stats["total"] if stats["total"] > 0 else 0
+    stats["yield_rate"] = yield_rate
     
     # Log stats
     logger.info("")
     logger.info("=" * 60)
-    logger.info("DR MVP BUILD STATS")
+    logger.info("DS MVP BUILD STATS")
     logger.info("=" * 60)
-    logger.info(f"Total Ds samples:        {stats['total']}")
-    logger.info(f"Correct behavior (Dr):   {stats['correct_behavior']} ({success_rate:.1%})")
-    logger.info(f"Wrong tool:              {stats['wrong_tool']}")
+    logger.info(f"Total records processed: {stats['total']}")
+    logger.info(f"Successful flips (Ds):   {stats['successful_flips']} ({yield_rate:.1%})")
+    logger.info(f"Correct behavior:        {stats['correct_behavior']}")
     logger.info(f"No tool call:            {stats['no_tool_call']}")
+    logger.info(f"Other tool:              {stats['other_tool']}")
     logger.info(f"Format errors:           {stats['format_errors']}")
-    logger.info(f"Success rate:            {success_rate:.1%}")
+    logger.info(f"Yield rate:              {yield_rate:.1%}")
+    logger.info(f"Min yield threshold:     {min_yield:.1%}")
     logger.info("=" * 60)
     
-    return dr_samples, stats
+    # Check yield threshold
+    if yield_rate < min_yield:
+        error_msg = (
+            f"Ds yield too low ({yield_rate:.1%} < {min_yield:.1%}). "
+            f"Cannot train tool-flip breaker from model that rarely flips. "
+            f"Consider: higher temperature, different generator model, or attack prompt tuning."
+        )
+        logger.error(error_msg)
+        stats["error"] = error_msg
+    
+    return (all_samples if save_all else ds_samples), stats
 
 
-def build_dr_mvp_vllm(
-    ds_samples: List[Dict[str, Any]],
+def build_ds_mvp_vllm(
+    b4_records: List[Dict[str, Any]],
     vllm_backend: "VLLMBackend",
     tools: List[Dict[str, Any]],
     system_prompt: str,
     batch_size: int = 32,
-    temperature: float = 0.3,
+    temperature: float = 0.7,
     max_tokens: int = 256,
+    min_yield: float = 0.10,
+    save_all: bool = False,
     verbose: bool = True,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
-    Build Dr using vLLM backend with batched generation.
+    Build Ds using vLLM backend with batched generation.
+    
+    Optimized for multi-GPU (tensor parallel) inference.
     """
-    dr_samples = []
+    ds_samples = []
+    all_samples = []
+    
     stats = {
         "total": 0,
+        "successful_flips": 0,
         "correct_behavior": 0,
-        "wrong_tool": 0,
         "no_tool_call": 0,
+        "other_tool": 0,
         "format_errors": 0,
     }
     
-    # Prepare all prompts
-    logger.info(f"Preparing {len(ds_samples)} prompts for batched Dr generation...")
+    # Prepare all prompts first
+    logger.info(f"Preparing {len(b4_records)} prompts for batched generation...")
     all_prompts = []
-    sample_data = []
-    
-    for ds_sample in ds_samples:
-        labels = ds_sample.get("labels", {})
-        expected_tool = labels.get("expected_tool", "")
-        metadata = ds_sample.get("metadata", {})
-        benign_query = metadata.get("benign_query", "")
-        
-        if not benign_query:
-            messages = ds_sample.get("messages", [])
-            for msg in messages:
-                if msg.get("role") == "user":
-                    original_prompt = msg.get("content", "")
-                    benign_query = remove_injection(original_prompt)
-                    break
-        
-        if not benign_query:
-            continue
-        
+    for record in b4_records:
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": benign_query},
+            {"role": "user", "content": record["combined_query"]},
         ]
         prompt = vllm_backend.format_prompt_with_tools(messages, tools)
         all_prompts.append(prompt)
-        sample_data.append({
-            "ds_sample": ds_sample,
-            "messages": messages,
-            "benign_query": benign_query,
-            "expected_tool": expected_tool,
-        })
     
-    # Generate in batches
+    # Process in batches
     num_batches = (len(all_prompts) + batch_size - 1) // batch_size
     all_responses = []
     
-    logger.info(f"Generating responses in {num_batches} batches...")
+    logger.info(f"Generating responses in {num_batches} batches (batch_size={batch_size})...")
     
-    for batch_idx in tqdm(range(num_batches), desc="Generating Dr batches"):
+    for batch_idx in tqdm(range(num_batches), desc="Generating batches"):
         start_idx = batch_idx * batch_size
         end_idx = min(start_idx + batch_size, len(all_prompts))
         batch_prompts = all_prompts[start_idx:end_idx]
@@ -699,67 +707,101 @@ def build_dr_mvp_vllm(
     
     # Process results
     logger.info("Processing generated responses...")
-    for data, response in tqdm(zip(sample_data, all_responses), total=len(sample_data), desc="Building Dr MVP"):
+    for i, (record, response) in enumerate(tqdm(zip(b4_records, all_responses), 
+                                                   total=len(b4_records),
+                                                   desc="Building Ds MVP")):
         stats["total"] += 1
         
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": record["combined_query"]},
+        ]
+        
+        # Extract tool call
         tool_call = extract_tool_call(response)
         observed_tool = tool_call["name"] if tool_call else None
-        expected_tool = data["expected_tool"]
+        expected_tool = record["expected_tool"]
+        simulated_tool = record["simulated_tool"]
         
+        # Determine outcome
         if observed_tool is None:
             stats["no_tool_call"] += 1
-            is_correct = False
+            is_flip_success = False
+        elif observed_tool == simulated_tool:
+            stats["successful_flips"] += 1
+            is_flip_success = True
         elif observed_tool == expected_tool:
             stats["correct_behavior"] += 1
-            is_correct = True
+            is_flip_success = False
         else:
-            stats["wrong_tool"] += 1
-            is_correct = False
+            stats["other_tool"] += 1
+            is_flip_success = False
         
+        # Validate format
         is_valid, format_error = validate_llama_format(response)
         if not is_valid:
             stats["format_errors"] += 1
+            if verbose and stats["format_errors"] <= 5:
+                logger.warning(f"Format error: {format_error} in {record['id']}")
         
-        if is_correct:
-            sample = {
-                "id": f"{data['ds_sample'].get('id')}_benign",
-                "messages": data["messages"],
-                "tools": "b4_standard_v1",
-                "assistant_raw": response,
-                "tool_calls_structured": [tool_call] if tool_call else [],
-                "labels": {
-                    "expected_tool": expected_tool,
-                    "observed_tool": observed_tool,
-                    "is_flip_success": False,
-                },
-                "metadata": {
-                    "split": "retain",
-                    "source": "b4",
-                    "paired_with": data["ds_sample"].get("id"),
-                    "benign_query": data["benign_query"],
-                    "format_valid": is_valid,
-                    "format_error": format_error if not is_valid else None,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                },
-            }
-            dr_samples.append(sample)
+        # Build sample
+        sample = {
+            "id": record["id"],
+            "messages": messages,
+            "tools": "b4_standard_v1",
+            "assistant_raw": response,
+            "tool_calls_structured": [tool_call] if tool_call else [],
+            "labels": {
+                "expected_tool": expected_tool,
+                "observed_tool": observed_tool,
+                "simulated_tool": simulated_tool,
+                "is_flip_success": is_flip_success,
+            },
+            "metadata": {
+                "split": "train",
+                "source": "b4",
+                "benign_query": record["benign_query"],
+                "malicious_injection": record["malicious_injection"],
+                "format_valid": is_valid,
+                "format_error": format_error if not is_valid else None,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                **record.get("metadata", {}),
+            },
+        }
+        
+        all_samples.append(sample)
+        
+        if is_flip_success:
+            ds_samples.append(sample)
     
-    success_rate = stats["correct_behavior"] / stats["total"] if stats["total"] > 0 else 0
-    stats["success_rate"] = success_rate
+    # Compute yield rate
+    yield_rate = stats["successful_flips"] / stats["total"] if stats["total"] > 0 else 0
+    stats["yield_rate"] = yield_rate
     
+    # Log stats
     logger.info("")
     logger.info("=" * 60)
-    logger.info("DR MVP BUILD STATS (vLLM)")
+    logger.info("DS MVP BUILD STATS (vLLM)")
     logger.info("=" * 60)
-    logger.info(f"Total Ds samples:        {stats['total']}")
-    logger.info(f"Correct behavior (Dr):   {stats['correct_behavior']} ({success_rate:.1%})")
-    logger.info(f"Wrong tool:              {stats['wrong_tool']}")
+    logger.info(f"Total records processed: {stats['total']}")
+    logger.info(f"Successful flips (Ds):   {stats['successful_flips']} ({yield_rate:.1%})")
+    logger.info(f"Correct behavior:        {stats['correct_behavior']}")
     logger.info(f"No tool call:            {stats['no_tool_call']}")
+    logger.info(f"Other tool:              {stats['other_tool']}")
     logger.info(f"Format errors:           {stats['format_errors']}")
-    logger.info(f"Success rate:            {success_rate:.1%}")
+    logger.info(f"Yield rate:              {yield_rate:.1%}")
+    logger.info(f"Min yield threshold:     {min_yield:.1%}")
     logger.info("=" * 60)
     
-    return dr_samples, stats
+    if yield_rate < min_yield:
+        error_msg = (
+            f"Ds yield too low ({yield_rate:.1%} < {min_yield:.1%}). "
+            f"Cannot train tool-flip breaker from model that rarely flips."
+        )
+        logger.error(error_msg)
+        stats["error"] = error_msg
+    
+    return (all_samples if save_all else ds_samples), stats
 
 
 # =============================================================================
@@ -768,17 +810,17 @@ def build_dr_mvp_vllm(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate MVP Retain Set (Dr) as paired benign twins",
+        description="Generate MVP Circuit Breaker Set (Ds) with behavioral filtering",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
     
     # Data paths
     parser.add_argument(
-        "--ds-data",
+        "--b4-data",
         type=Path,
-        default=BASE_DIR / "data" / "cb_mvp" / "ds_stage1.jsonl",
-        help="Path to Ds data (from generate_ds_mvp.py)",
+        default=BASE_DIR / "data" / "fujitsu" / "orchestrator_attacks_combined_deduplicated.jsonl",
+        help="Path to Fujitsu B4 data",
     )
     parser.add_argument(
         "--tool-schema",
@@ -789,8 +831,14 @@ def main():
     parser.add_argument(
         "--output",
         type=Path,
-        default=BASE_DIR / "data" / "cb_mvp" / "dr_stage1.jsonl",
-        help="Output path for Dr",
+        default=BASE_DIR / "data" / "cb_mvp" / "ds_stage1.jsonl",
+        help="Output path for Ds",
+    )
+    parser.add_argument(
+        "--output-ids",
+        type=Path,
+        default=None,
+        help="Output path for training IDs (for held-out split)",
     )
     
     # Model
@@ -837,8 +885,14 @@ def main():
     parser.add_argument(
         "--temperature",
         type=float,
-        default=0.3,
-        help="Generation temperature (lower = more consistent)",
+        default=0.7,
+        help="Generation temperature (higher = more varied outputs)",
+    )
+    parser.add_argument(
+        "--min-yield",
+        type=float,
+        default=0.10,
+        help="Minimum acceptable yield rate (default: 10%%)",
     )
     
     # Options
@@ -846,12 +900,22 @@ def main():
         "--limit",
         type=int,
         default=None,
-        help="Limit number of Ds samples to process",
+        help="Limit number of records to process",
+    )
+    parser.add_argument(
+        "--save-all",
+        action="store_true",
+        help="Save all records, not just successful flips (for debugging)",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Load data and show stats without generating",
+    )
+    parser.add_argument(
+        "--fail-on-low-yield",
+        action="store_true",
+        help="Exit with code 1 if yield < min-yield",
     )
     
     args = parser.parse_args()
@@ -865,28 +929,21 @@ def main():
     tools = get_tools_list(schema)
     system_prompt = get_system_prompt(schema)
     
-    # Load Ds data
-    if not args.ds_data.exists():
-        logger.error(f"Ds data not found: {args.ds_data}")
+    # Load B4 data
+    if not args.b4_data.exists():
+        logger.error(f"B4 data not found: {args.b4_data}")
         return 1
     
-    logger.info(f"Loading Ds data from {args.ds_data}...")
-    ds_samples = load_ds_samples(args.ds_data)
-    
-    if args.limit:
-        ds_samples = ds_samples[:args.limit]
-    
-    logger.info(f"Loaded {len(ds_samples)} Ds samples")
+    logger.info(f"Loading B4 data from {args.b4_data}...")
+    b4_records = list(load_fujitsu_b4(args.b4_data, limit=args.limit))
+    logger.info(f"Loaded {len(b4_records)} B4 records")
     
     if args.dry_run:
         logger.info("DRY RUN - showing sample records:")
-        for sample in ds_samples[:3]:
-            logger.info(f"  {sample.get('id')}")
-            labels = sample.get("labels", {})
-            logger.info(f"    expected: {labels.get('expected_tool')}")
-            metadata = sample.get("metadata", {})
-            benign_query = metadata.get("benign_query", "N/A")[:80]
-            logger.info(f"    benign: {benign_query}...")
+        for record in b4_records[:3]:
+            logger.info(f"  {record['id']}")
+            logger.info(f"    expected: {record['expected_tool']}, simulated: {record['simulated_tool']}")
+            logger.info(f"    query: {record['combined_query'][:80]}...")
         logger.info(f"Would write to: {args.output}")
         return 0
     
@@ -905,14 +962,16 @@ def main():
             dtype=args.dtype,
         )
         
-        # Build Dr MVP with vLLM (batched)
-        dr_samples, stats = build_dr_mvp_vllm(
-            ds_samples=ds_samples,
+        # Build Ds MVP with vLLM (batched)
+        ds_samples, stats = build_ds_mvp_vllm(
+            b4_records=b4_records,
             vllm_backend=vllm_backend,
             tools=tools,
             system_prompt=system_prompt,
             batch_size=args.batch_size,
             temperature=args.temperature,
+            min_yield=args.min_yield,
+            save_all=args.save_all,
         )
     else:
         logger.info("Using transformers backend")
@@ -922,24 +981,34 @@ def main():
             torch_dtype=dtype_map[args.dtype],
         )
         
-        # Build Dr MVP with transformers
-        dr_samples, stats = build_dr_mvp(
-            ds_samples=ds_samples,
+        # Build Ds MVP with transformers
+        ds_samples, stats = build_ds_mvp(
+            b4_records=b4_records,
             model=model,
             tokenizer=tokenizer,
             tools=tools,
             system_prompt=system_prompt,
             temperature=args.temperature,
+            min_yield=args.min_yield,
+            save_all=args.save_all,
         )
     
     # Write output
     args.output.parent.mkdir(parents=True, exist_ok=True)
     
     with open(args.output, "w", encoding="utf-8") as f:
-        for sample in dr_samples:
+        for sample in ds_samples:
             f.write(json.dumps(sample, ensure_ascii=False) + "\n")
     
-    logger.info(f"Wrote {len(dr_samples)} samples to {args.output}")
+    logger.info(f"Wrote {len(ds_samples)} samples to {args.output}")
+    
+    # Write IDs file
+    if args.output_ids or True:  # Always write IDs
+        ids_path = args.output_ids or args.output.with_suffix(".ids.txt")
+        with open(ids_path, "w", encoding="utf-8") as f:
+            for sample in ds_samples:
+                f.write(sample["id"] + "\n")
+        logger.info(f"Wrote IDs to {ids_path}")
     
     # Write stats
     stats_path = args.output.with_suffix(".stats.json")
@@ -947,11 +1016,10 @@ def main():
         json.dump(stats, f, indent=2)
     logger.info(f"Wrote stats to {stats_path}")
     
-    # Report ratio
-    ratio = len(dr_samples) / len(ds_samples) if ds_samples else 0
-    logger.info(f"Dr:Ds ratio = {len(dr_samples)}:{len(ds_samples)} ({ratio:.2f})")
-    if ratio < 0.5:
-        logger.warning("Dr:Ds ratio < 0.5 - consider adjusting temperature or filtering")
+    # Check yield threshold
+    if args.fail_on_low_yield and stats.get("yield_rate", 0) < args.min_yield:
+        logger.error("Yield rate below threshold - exiting with code 1")
+        return 1
     
     # Clean up
     if args.backend == "vllm":

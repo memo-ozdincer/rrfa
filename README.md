@@ -13,8 +13,8 @@ This repository contains the pipeline for training and evaluating Circuit Breake
 │       └── orchestrator_attacks_combined_deduplicated.jsonl  # Source attack data
 ├── src/
 │   ├── data_generation/            # Data pipeline scripts
-│   │   ├── generate_ds_mvp.py      # Generate harmful set (Ds)
-│   │   ├── generate_dr_mvp.py      # Generate retain set (Dr)
+│   │   ├── generate_ds.py      # Generate harmful set (Ds)
+│   │   ├── generate_dr.py      # Generate retain set (Dr)
 │   │   ├── create_eval_set.py      # Create held-out eval set
 │   │   ├── validate_format.py      # Validate Llama 3.1 format
 │   │   └── rebuild_training_data.py # Rebuild with proper format
@@ -24,7 +24,7 @@ This repository contains the pipeline for training and evaluating Circuit Breake
 │   │   ├── trainer.py              # CircuitBreakerTrainer class
 │   │   └── hf_utils.py             # HuggingFace utilities
 │   ├── evaluation/                 # Evaluation scripts
-│   │   ├── eval_mvp.py             # MVP evaluation (ASR, capability)
+│   │   ├── eval.py             # MVP evaluation (ASR, capability)
 │   │   └── sanity_check.py         # Adapter sanity check
 │   └── utils/
 │       └── wandb_logging.py        # W&B logging utilities

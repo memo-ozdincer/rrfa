@@ -127,15 +127,15 @@ accelerate launch --num_processes ${SLURM_GPUS_ON_NODE:-1} \
     --data-path "$COMBINED_FILE" \
     --output-dir "$OUTPUT_DIR" \
     --loss-weighting dual \
-    --alpha-max 0.5 \
+    --alpha-max 10.0 \
     --alpha-decay-multiplier 2.0 \
-    --total-steps 300 \
+    --total-steps 500 \
     --batch-size 4 \
     --gradient-accumulation-steps 4 \
-    --learning-rate 3e-5 \
+    --learning-rate 5e-5 \
     --lora-r 16 \
     --lora-alpha 32 \
-    --cb-target-layers 15 \
+    --cb-target-layers 10 20 \
     --wandb-project "circuit-breakers" \
     --wandb-run-name "cb_full_4gpu_${SLURM_JOB_ID}"
 

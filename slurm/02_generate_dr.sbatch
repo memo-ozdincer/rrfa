@@ -60,7 +60,7 @@ fi
 echo "Found Ds file: $DS_FILE ($(wc -l < "$DS_FILE") samples)"
 
 # Run Dr Generation
-python src/data_generation/generate_dr_mvp.py \
+python src/data_generation/generate_dr.py \
     --ds-data "$DS_FILE" \
     --tool-schema configs/tool_schemas/b4_standard_v1.json \
     --model meta-llama/Llama-3.1-8B-Instruct \
