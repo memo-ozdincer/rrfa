@@ -56,6 +56,7 @@ echo "Date: $(date)"
 BASE_MODEL="meta-llama/Llama-3.1-8B-Instruct"
 DATA_DIR="$CB_SCRATCH/data"
 TRAINING_FILE="$DATA_DIR/cb_training_batches.jsonl"
+OUTPUT_DIR="$CB_SCRATCH/models/cb_${SLURM_JOB_ID}"
 
 if [[ ! -f "$TRAINING_FILE" ]]; then
     echo "ERROR: Training file not found at $TRAINING_FILE"
