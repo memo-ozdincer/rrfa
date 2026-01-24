@@ -2,3 +2,16 @@ data/webarena/human_trajectories
 data/webarena/llm_trajectories_v2
 .DS_Store
 related_repos/
+
+# ============================================================
+# GENERATED DATA (reproducible from pipeline - do not track)
+# ============================================================
+
+# Tier B: ETL_A outputs (canonical traces)
+data/traces/
+
+# Tier C: ETL_B outputs (renders + lossmasks)
+data/renders/
+data/lossmasks/
+
+# Keep raw Tier A data tracked (required inputs)

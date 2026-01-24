@@ -15,6 +15,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
+import yaml
 from transformers import AutoTokenizer
 
 from src.schemas.trace import Trace
@@ -41,6 +42,45 @@ from src.schemas.registry import (
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Llama 3.1 Format Constants
+# =============================================================================
+
+LLAMA_BOS = "<|begin_of_text|>"
+LLAMA_HEADER_START = "<|start_header_id|>"
+LLAMA_HEADER_END = "<|end_header_id|>"
+LLAMA_EOT = "<|eot_id|>"
+LLAMA_EOM = "<|eom_id|>"  # End of message - used for tool calls expecting response
+LLAMA_PYTHON_TAG = "<|python_tag|>"
+
+
+def _is_llama_tokenizer(tokenizer) -> bool:
+    """Check if tokenizer is a Llama-style tokenizer that needs special tool call handling."""
+    name = getattr(tokenizer, "name_or_path", "") or ""
+    name_lower = name.lower()
+    # Check for Llama model names
+    if "llama" in name_lower:
+        return True
+    # Check for python_tag token in vocabulary
+    try:
+        python_tag_id = tokenizer.convert_tokens_to_ids("<|python_tag|>")
+        if python_tag_id != tokenizer.unk_token_id:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _format_llama31_header(role: str) -> str:
+    """Format a role header in Llama 3.1 format."""
+    return f"{LLAMA_HEADER_START}{role}{LLAMA_HEADER_END}\n\n"
+
+
+def _format_tool_call_json(tool_name: str, arguments: Dict[str, Any]) -> str:
+    """Format a tool call as Llama 3.1 JSON format."""
+    return f'{LLAMA_PYTHON_TAG}{{"name": "{tool_name}", "parameters": {json.dumps(arguments, ensure_ascii=False)}}}'
 
 
 # =============================================================================
@@ -82,6 +122,11 @@ def _default_lmp_registry() -> LMPRegistry:
             name="Full Sequence",
             strategy="full_sequence",
             description="Loss on all tokens.",
+        ),
+        "cb_full_sequence": LMPPolicy(
+            name="CB Full Sequence",
+            strategy="cb_full_sequence",
+            description="Loss on all non-system tokens (attack-agnostic).",
         ),
         "tool_calls_only": LMPPolicy(
             name="Tool Calls Only",
@@ -151,6 +196,7 @@ def _compute_prefixes(
     tokenizer,
     chat_messages: List[Dict[str, Any]],
     add_generation_prompt: bool,
+    chat_template: Optional[str] = None,
 ) -> Tuple[List[int], List[int], List[str]]:
     token_ends: List[int] = []
     char_ends: List[int] = []
@@ -162,6 +208,7 @@ def _compute_prefixes(
             prefix,
             tokenize=False,
             add_generation_prompt=add_generation_prompt,
+            chat_template=chat_template,
         )
         prefix_texts.append(rendered_text)
 
@@ -169,10 +216,75 @@ def _compute_prefixes(
             prefix,
             tokenize=True,
             add_generation_prompt=add_generation_prompt,
+            chat_template=chat_template,
         )
         token_ends.append(len(input_ids))
         char_ends.append(len(rendered_text))
 
+    return token_ends, char_ends, prefix_texts
+
+
+def _compute_prefixes_llama31_manual(
+    tokenizer,
+    trace: Trace,
+    add_generation_prompt: bool,
+) -> Tuple[List[int], List[int], List[str]]:
+    """
+    Compute prefix boundaries using manual Llama 3.1 rendering.
+    
+    This ensures prefix computations match the manual rendering with proper
+    tool call format.
+    """
+    token_ends: List[int] = []
+    char_ends: List[int] = []
+    prefix_texts: List[str] = []
+    
+    for i in range(len(trace.messages)):
+        # Create a partial trace with messages up to index i
+        partial_messages = trace.messages[: i + 1]
+        
+        # Build partial rendered text manually
+        parts = [LLAMA_BOS]
+        for msg in partial_messages:
+            parts.append(_format_llama31_header(msg.role))
+            
+            if msg.content:
+                parts.append(msg.content)
+            
+            if msg.role == "assistant" and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    args = tc.function.arguments or {}
+                    if tc.function.arguments_json:
+                        try:
+                            args = json.loads(tc.function.arguments_json)
+                        except json.JSONDecodeError:
+                            pass
+                    tool_call_str = _format_tool_call_json(tc.function.name, args)
+                    if msg.content:
+                        parts.append("\n\n")
+                    parts.append(tool_call_str)
+                parts.append(LLAMA_EOM)
+            elif msg.role == "tool":
+                parts.append(LLAMA_EOT)
+            else:
+                parts.append(LLAMA_EOT)
+        
+        # Only add generation prompt for the final prefix if requested
+        if add_generation_prompt and i == len(trace.messages) - 1:
+            parts.append(_format_llama31_header("assistant"))
+        
+        rendered_text = "".join(parts)
+        prefix_texts.append(rendered_text)
+        
+        # Tokenize to get token count
+        input_ids = tokenizer(
+            rendered_text,
+            add_special_tokens=False,
+        )["input_ids"]
+        
+        token_ends.append(len(input_ids))
+        char_ends.append(len(rendered_text))
+    
     return token_ends, char_ends, prefix_texts
 
 
@@ -446,6 +558,53 @@ def _mask_action_commitment(render: RenderedView, mask: List[float]) -> List[flo
     return _mask_action_prefix_only(render, mask)
 
 
+def _mask_cb_full_sequence(render: RenderedView, mask: List[float]) -> List[float]:
+    """Loss on all non-system tokens. Attack-agnostic CB policy."""
+    if render.alignment and render.alignment.message_spans:
+        for span in render.alignment.message_spans:
+            if span.role != "system":
+                for i in range(span.token_start, min(span.token_end, len(mask))):
+                    mask[i] = 1.0
+        return mask
+    return _mask_full_sequence(render, mask)
+
+
+def _mask_custom(render: RenderedView, mask: List[float], params: Optional[Dict[str, Any]]) -> List[float]:
+    params = params or {}
+    applied = False
+
+    roles = params.get("roles")
+    if roles and render.alignment and render.alignment.message_spans:
+        role_set = set(roles)
+        weight = float(params.get("weight", 1.0))
+        for span in render.alignment.message_spans:
+            if span.role in role_set:
+                for i in range(span.token_start, min(span.token_end, len(mask))):
+                    mask[i] = weight
+        applied = True
+
+    token_ranges = params.get("token_ranges")
+    if token_ranges:
+        for tr in token_ranges:
+            if isinstance(tr, dict):
+                start = int(tr.get("start", 0))
+                end = int(tr.get("end", 0))
+                weight = float(tr.get("weight", 1.0))
+            else:
+                try:
+                    start, end = tr
+                    weight = float(params.get("weight", 1.0))
+                except Exception:
+                    continue
+            for i in range(max(0, start), min(end, len(mask))):
+                mask[i] = weight
+        applied = True
+
+    if not applied:
+        return _mask_assistant_only(render, mask)
+    return mask
+
+
 def _apply_lmp_policy(render: RenderedView, policy: LMPPolicy) -> List[float]:
     mask = [0.0] * len(render.input_ids)
 
@@ -461,6 +620,10 @@ def _apply_lmp_policy(render: RenderedView, policy: LMPPolicy) -> List[float]:
         return _mask_action_prefix_only(render, mask)
     if policy.strategy == "action_commitment":
         return _mask_action_commitment(render, mask)
+    if policy.strategy == "cb_full_sequence":
+        return _mask_cb_full_sequence(render, mask)
+    if policy.strategy == "custom":
+        return _mask_custom(render, mask, policy.params)
 
     return _mask_assistant_only(render, mask)
 
@@ -485,15 +648,156 @@ def _resolve_policy(
     return default_policy, registry.get_policy(default_policy)
 
 
+def _get_phase_value(phase: Any, key: str) -> Optional[Any]:
+    if hasattr(phase, key):
+        return getattr(phase, key)
+    if isinstance(phase, dict):
+        return phase.get(key)
+    return None
+
+
+def _select_phase_for_step(phases: List[Any], step: int) -> Tuple[Optional[Any], Optional[Any]]:
+    if not phases:
+        return None, None
+
+    current_phase = None
+    next_phase = None
+
+    for phase in phases:
+        start_step = _get_phase_value(phase, "start_step")
+        end_step = _get_phase_value(phase, "end_step")
+
+        if start_step is None or end_step is None:
+            continue
+
+        if start_step <= step < end_step:
+            current_phase = phase
+        elif start_step > step and next_phase is None:
+            next_phase = phase
+
+    if current_phase is None:
+        first = phases[0]
+        last = phases[-1]
+        first_start = _get_phase_value(first, "start_step")
+        last_start = _get_phase_value(last, "start_step")
+        if first_start is not None and step < first_start:
+            current_phase = first
+        elif last_start is not None:
+            current_phase = last
+
+    return current_phase, next_phase
+
+
+def _interpolate_weights(
+    current_weights: Dict[str, float],
+    next_weights: Dict[str, float],
+    progress: float,
+) -> Dict[str, float]:
+    weights = {}
+    all_classes = set(current_weights.keys()) | set(next_weights.keys())
+    for cls in all_classes:
+        w1 = current_weights.get(cls, 0.0)
+        w2 = next_weights.get(cls, w1)
+        weights[cls] = w1 + (w2 - w1) * progress
+    return weights
+
+
+def _load_mwcs_schedule_yaml(path: Path) -> Optional[Dict[str, Any]]:
+    if not path.exists():
+        logger.warning("MWCS schedule YAML not found at %s; using base weights.", path)
+        return None
+    try:
+        with open(path, "r") as f:
+            data = yaml.safe_load(f)
+        return data or None
+    except Exception:
+        logger.warning("Failed to load MWCS schedule YAML at %s; using base weights.", path)
+        return None
+
+
+def _resolve_yaml_schedule(
+    schedule_data: Dict[str, Any],
+    step: int,
+) -> Tuple[Dict[str, float], Optional[Dict[str, str]]]:
+    class_weights = schedule_data.get("class_weights", {})
+    curriculum = schedule_data.get("curriculum")
+    if curriculum is None and schedule_data.get("phases"):
+        curriculum = schedule_data
+
+    if not curriculum or not curriculum.get("phases"):
+        return class_weights, None
+
+    phases = curriculum.get("phases", [])
+    interpolation = curriculum.get("interpolation", "none")
+    current_phase, next_phase = _select_phase_for_step(phases, step)
+
+    if current_phase is None:
+        return class_weights, None
+
+    current_weights = current_phase.get("class_weights") or class_weights
+    if interpolation == "linear" and next_phase is not None:
+        next_weights = next_phase.get("class_weights") or current_weights
+        start_step = current_phase.get("start_step", 0)
+        end_step = current_phase.get("end_step", start_step + 1)
+        denom = max(1, end_step - start_step)
+        progress = max(0.0, min(1.0, (step - start_step) / denom))
+        weights = _interpolate_weights(current_weights, next_weights, progress)
+    else:
+        weights = current_weights
+
+    lmp_overrides = current_phase.get("lmp_overrides") or None
+    return weights, lmp_overrides
+
+
 def _apply_mwcs_weight(
     trace: Trace,
     registry: Optional[MWCSRegistry],
     mwcs_schedule: Optional[str],
     step: Optional[int],
-) -> float:
+) -> Tuple[float, Optional[str]]:
     base_weight = trace.training.sample_weight if trace.training else 1.0
-    if not mwcs_schedule or registry is None:
-        return base_weight
+    class_id = trace.training.mixture.class_id if trace.training and trace.training.mixture else None
+    if not class_id:
+        return base_weight, None
+
+    schedule_step = step or 0
+
+    if mwcs_schedule and registry is not None:
+        try:
+            schedule = registry.get_schedule(mwcs_schedule)
+        except Exception:
+            logger.warning("MWCS schedule not found; using base sample weight.")
+            return base_weight, None
+
+        weights = schedule.get_weights_at_step(schedule_step)
+        lmp_override = None
+        if schedule.curriculum and schedule.curriculum.phases:
+            current_phase, _ = _select_phase_for_step(schedule.curriculum.phases, schedule_step)
+            if current_phase is not None:
+                lmp_override = current_phase.lmp_overrides.get(class_id) if current_phase.lmp_overrides else None
+
+        return base_weight * weights.get(class_id, 1.0), lmp_override
+
+    return base_weight, None
+
+
+def _apply_mwcs_weight_with_yaml(
+    trace: Trace,
+    schedule_path: Optional[Path],
+    step: Optional[int],
+) -> Tuple[float, Optional[str]]:
+    base_weight = trace.training.sample_weight if trace.training else 1.0
+    class_id = trace.training.mixture.class_id if trace.training and trace.training.mixture else None
+    if not schedule_path or not class_id:
+        return base_weight, None
+
+    schedule_data = _load_mwcs_schedule_yaml(schedule_path)
+    if not schedule_data:
+        return base_weight, None
+
+    weights, lmp_overrides = _resolve_yaml_schedule(schedule_data, step or 0)
+    lmp_override = lmp_overrides.get(class_id) if lmp_overrides else None
+    return base_weight * weights.get(class_id, 1.0), lmp_override
 
     try:
         schedule = registry.get_schedule(mwcs_schedule)
@@ -509,20 +813,99 @@ def _apply_mwcs_weight(
     return base_weight * weights.get(class_id, 1.0)
 
 
+def _render_trace_llama31_manual(
+    trace: Trace,
+    add_generation_prompt: bool,
+) -> str:
+    """
+    Manually render a trace in Llama 3.1 format with proper tool call handling.
+    
+    Formats tool calls as:
+        <|python_tag|>{"name": "...", "parameters": {...}}<|eom_id|>
+    
+    This is required because HuggingFace's apply_chat_template may not properly
+    format tool calls for Llama 3.1 models.
+    """
+    parts = [LLAMA_BOS]
+    
+    for msg in trace.messages:
+        parts.append(_format_llama31_header(msg.role))
+        
+        # Add content (may be empty for tool-call-only messages)
+        if msg.content:
+            parts.append(msg.content)
+        
+        # Handle tool calls in assistant messages
+        if msg.role == "assistant" and msg.tool_calls:
+            for tc in msg.tool_calls:
+                # Get arguments
+                args = tc.function.arguments or {}
+                if tc.function.arguments_json:
+                    try:
+                        args = json.loads(tc.function.arguments_json)
+                    except json.JSONDecodeError:
+                        pass
+                
+                # Format the tool call
+                tool_call_str = _format_tool_call_json(tc.function.name, args)
+                
+                # Add newline separator if there's content before tool call
+                if msg.content:
+                    parts.append("\n\n")
+                parts.append(tool_call_str)
+            
+            # Use <|eom_id|> for tool calls (expecting tool response)
+            parts.append(LLAMA_EOM)
+        elif msg.role == "tool":
+            # Tool responses use <|eot_id|>
+            parts.append(LLAMA_EOT)
+        else:
+            # Regular messages use <|eot_id|>
+            parts.append(LLAMA_EOT)
+    
+    # Add generation prompt if requested
+    if add_generation_prompt:
+        parts.append(_format_llama31_header("assistant"))
+    
+    return "".join(parts)
+
+
+def _trace_has_tool_calls(trace: Trace) -> bool:
+    """Check if any message in the trace has tool calls."""
+    for msg in trace.messages:
+        if msg.tool_calls:
+            return True
+    return False
+
+
 def render_trace(
     trace: Trace,
     tokenizer,
     max_length: int,
     add_generation_prompt: bool,
     include_rendered_text: bool,
+    chat_template: Optional[str] = None,
+    force_llama_format: bool = False,
 ) -> RenderedView:
     chat_messages = _trace_to_chat_messages(trace)
 
-    rendered_text = tokenizer.apply_chat_template(
-        chat_messages,
-        tokenize=False,
-        add_generation_prompt=add_generation_prompt,
+    # Use manual Llama 3.1 rendering for tool calls when using a Llama tokenizer
+    # This ensures proper <|python_tag|>{"name": "...", "parameters": {...}}<|eom_id|> format
+    use_manual_llama_rendering = (
+        (force_llama_format or _is_llama_tokenizer(tokenizer))
+        and _trace_has_tool_calls(trace)
+        and chat_template is None  # Only use manual if no custom template provided
     )
+    
+    if use_manual_llama_rendering:
+        rendered_text = _render_trace_llama31_manual(trace, add_generation_prompt)
+    else:
+        rendered_text = tokenizer.apply_chat_template(
+            chat_messages,
+            tokenize=False,
+            add_generation_prompt=add_generation_prompt,
+            chat_template=chat_template,
+        )
 
     encoding = tokenizer(
         rendered_text,
@@ -555,11 +938,20 @@ def render_trace(
         ),
     )
 
-    prefix_token_ends, prefix_char_ends, prefix_texts = _compute_prefixes(
-        tokenizer,
-        chat_messages,
-        add_generation_prompt,
-    )
+    # Compute prefix boundaries using matching rendering method
+    if use_manual_llama_rendering:
+        prefix_token_ends, prefix_char_ends, prefix_texts = _compute_prefixes_llama31_manual(
+            tokenizer,
+            trace,
+            add_generation_prompt,
+        )
+    else:
+        prefix_token_ends, prefix_char_ends, prefix_texts = _compute_prefixes(
+            tokenizer,
+            chat_messages,
+            add_generation_prompt,
+            chat_template=chat_template,
+        )
     render.alignment = _compute_alignment(
         trace,
         render,
@@ -589,6 +981,12 @@ def main() -> None:
     parser.add_argument("--render-out", required=True, type=Path, help="Output render_v1 JSONL file")
     parser.add_argument("--lossmask-out", required=True, type=Path, help="Output lossmask_v1 JSONL file")
     parser.add_argument("--tokenizer", required=True, help="Tokenizer name or path")
+    parser.add_argument(
+        "--chat-template",
+        type=str,
+        default=None,
+        help="Chat template string or path to a template file (for tokenizers without chat_template)",
+    )
     parser.add_argument("--max-length", type=int, default=4096, help="Max sequence length")
     parser.add_argument("--add-generation-prompt", action="store_true", help="Append generation prompt")
     parser.add_argument("--include-rendered-text", action="store_true", help="Include rendered_text in output")
@@ -597,6 +995,8 @@ def main() -> None:
     parser.add_argument("--mwcs-registry", type=Path, default=None, help="Path to MWCS registry JSON")
     parser.add_argument("--mwcs-schedule", type=str, default=None, help="MWCS schedule ID")
     parser.add_argument("--mwcs-step", type=int, default=None, help="Training step for curriculum")
+    parser.add_argument("--lmp-schedule", type=Path, default=None, help="Path to MWCS schedule YAML for curriculum")
+    parser.add_argument("--step", type=int, default=None, help="Current training step for curriculum weights")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of traces processed")
     parser.add_argument(
         "--allow-skeleton", 
@@ -610,10 +1010,18 @@ def main() -> None:
         default="full_sequence",
         help="LMP policy to use for skeleton traces when --allow-skeleton is enabled (default: full_sequence)"
     )
+    parser.add_argument(
+        "--force-llama-format",
+        action="store_true",
+        help="Force Llama 3.1 tool call format (<|python_tag|>{...}<|eom_id|>) even for non-Llama tokenizers"
+    )
 
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+    chat_template = args.chat_template
+    if chat_template and Path(chat_template).exists():
+        chat_template = Path(chat_template).read_text()
     lmp_registry = _load_lmp_registry_safe(args.lmp_registry)
     mwcs_registry = None
     if args.mwcs_registry and args.mwcs_registry.exists():
@@ -655,6 +1063,8 @@ def main() -> None:
             max_length=args.max_length,
             add_generation_prompt=args.add_generation_prompt,
             include_rendered_text=args.include_rendered_text,
+            chat_template=chat_template,
+            force_llama_format=args.force_llama_format,
         )
 
         # For skeleton traces with --allow-skeleton, override to skeleton_policy
@@ -663,14 +1073,25 @@ def main() -> None:
             policy_override = args.skeleton_policy
             logger.debug("Using %s policy for skeleton trace %s", args.skeleton_policy, trace.id)
 
+        schedule_step = args.step if args.step is not None else args.mwcs_step
+        sample_weight, lmp_override = _apply_mwcs_weight_with_yaml(
+            trace,
+            args.lmp_schedule,
+            schedule_step,
+        )
+        if args.lmp_schedule is None:
+            sample_weight, lmp_override = _apply_mwcs_weight(
+                trace,
+                mwcs_registry,
+                args.mwcs_schedule,
+                schedule_step,
+            )
+
+        if lmp_override and policy_override is None:
+            policy_override = lmp_override
+
         policy_id, policy = _resolve_policy(trace, lmp_registry, policy_override)
         mask_values = _apply_lmp_policy(render, policy)
-        sample_weight = _apply_mwcs_weight(
-            trace,
-            mwcs_registry,
-            args.mwcs_schedule,
-            args.mwcs_step,
-        )
 
         lossmask = LossMask.from_render(
             render,

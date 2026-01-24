@@ -182,6 +182,9 @@ Notes:
 ------------------------------------------------------------
 4) Field Mapping Summary (Tier A -> Tier B)
 ------------------------------------------------------------
+Canonical mapping table (machine-readable):
+- docs/dataset_field_mappings.yaml
+
 Fujitsu B4 (Orchestrator / Tool Flip)
 - messages: system + user (combined_query)
 - labels: harmful if success=true
@@ -231,6 +234,9 @@ Pipeline flow for AgentDojo:
 ------------------------------------------------------------
 7) Dataset Field Coverage & Gaps
 ------------------------------------------------------------
+Canonical mapping table (machine-readable):
+- docs/dataset_field_mappings.yaml
+
 This section documents what each Tier A dataset provides and what may need
 augmentation to fully populate trace_v1 fields.
 

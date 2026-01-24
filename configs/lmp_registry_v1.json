@@ -1,0 +1,54 @@
+{
+  "version": "1.0.0",
+  "default_policy": "assistant_only",
+  "policies": {
+    "assistant_only": {
+      "name": "Assistant Only",
+      "strategy": "assistant_only",
+      "description": "Loss only on assistant messages. Standard SFT policy.",
+      "compatible_with": ["harmful", "benign"]
+    },
+    "completion_only": {
+      "name": "Completion Only",
+      "strategy": "completion_only",
+      "description": "Loss only on the final assistant message.",
+      "compatible_with": ["harmful", "benign"]
+    },
+    "full_sequence": {
+      "name": "Full Sequence",
+      "strategy": "full_sequence",
+      "description": "Loss on all tokens including system and user.",
+      "compatible_with": ["harmful", "benign"]
+    },
+    "cb_full_sequence": {
+      "name": "CB Full Sequence",
+      "strategy": "cb_full_sequence",
+      "description": "Loss on all non-system tokens (user + assistant). Attack-agnostic CB policy that generalizes to unseen attacks including representation-space and prefilling attacks.",
+      "compatible_with": ["harmful", "benign"]
+    },
+    "tool_calls_only": {
+      "name": "Tool Calls Only",
+      "strategy": "tool_calls_only",
+      "description": "Loss only on tool call spans within assistant messages.",
+      "compatible_with": ["harmful"]
+    },
+    "action_prefix_only": {
+      "name": "Action Prefix Only",
+      "strategy": "action_prefix_only",
+      "description": "Loss up to and including tool name in tool call. Focuses on the action selection decision.",
+      "compatible_with": ["harmful"]
+    },
+    "action_commitment": {
+      "name": "Action Commitment",
+      "strategy": "action_commitment",
+      "description": "Loss on commitment prefix tokens (up to where action becomes committed).",
+      "compatible_with": ["harmful"]
+    },
+    "custom": {
+      "name": "Custom",
+      "strategy": "custom",
+      "description": "Custom masking via params. Supports 'roles' (list of roles to mask) and 'token_ranges' (list of {start, end, weight}).",
+      "params": {}
+    }
+  }
+}

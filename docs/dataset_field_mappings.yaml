@@ -1,0 +1,179 @@
+version: 1
+schema:
+  tier_b: trace_v1
+  tier_b_schema_file: configs/schemas/trace_v1.json
+  converter: src/schemas/tools/ETL_A.py
+
+# Canonical mapping table for Tier A -> Tier B (trace_v1)
+# Designed to be machine-readable for ETL_A or validation tooling.
+
+datasets:
+  - dataset_id: fujitsu_b4
+    tier_a_source:
+      path: data/fujitsu/orchestrator_attacks_combined_deduplicated.jsonl
+      format: jsonl
+    converter:
+      function: convert_fujitsu_b4_record
+      module: src/schemas/tools/ETL_A.py
+    output:
+      tier: B1
+      completeness: skeleton
+    record_locator:
+      keys_preference: [record_id, attack_id, jsonl_line]
+      rule: first_present
+    messages:
+      - index: 0
+        role: system
+        content:
+          generated: true
+          value: "You are a helpful assistant with access to internal documents and web search."
+      - index: 1
+        role: user
+        content:
+          passthrough:
+            fields: [combined_query, benign_query]
+            rule: "combined_query if present else benign_query else empty string"
+    labels:
+      generated:
+        category: "harmful if success==true else benign"
+        security_outcome: "unsafe if success==true else safe"
+        attack_type: "tool_flip"
+        attack_succeeded: "success"
+    task:
+      generated:
+        family: tool_flip
+        name: orchestrator
+        variant:
+          passthrough: subtype
+    tool_attack:
+      passthrough:
+        expected_tool: expected_tool
+        observed_tool: simulated_tool
+        attack_vector: subtype
+        injection_text: malicious_injection
+    signal_hints:
+      generated:
+        expected_tool_name: expected_tool
+        observed_tool_name: simulated_tool
+        injection_char_span:
+          rule: "Find malicious_injection substring in user message content"
+          message_index: 1
+          char_start: "index of first match"
+          char_end: "char_start + len(malicious_injection)"
+          when_missing: null
+    training:
+      generated:
+        sample_weight: 1.0
+        loss_mask_policy: assistant_only
+        mixture.class_id: fujitsu_b4/tool_flip
+    links:
+      passthrough:
+        raw_id: record_id
+    generated_fields:
+      - id: "trace_fujitsu_b4_<content_hash>"
+      - created_at: "utc now"
+      - source.dataset: fujitsu_b4
+      - source.tier: raw
+      - source.subset: orchestrator
+      - source.ingest_version: etl_a_v1
+      - split: "from CLI --split"
+      - completeness: skeleton
+      - tier: B1
+    passthrough_fields:
+      - record_id
+      - attack_id
+      - category
+      - subtype
+      - benign_query
+      - malicious_injection
+      - combined_query
+      - expected_tool
+      - simulated_tool
+      - success
+      - judge_note
+      - models_used
+      - timestamp
+    injection_span_rules:
+      - "If malicious_injection is empty or not found in user content, injection_char_span is null."
+      - "Span is computed only within the user message (message_index=1)."
+    expected_loss_regions:
+      - "Tier B1 skeleton traces have no assistant messages, so assistant_only yields zero loss by default."
+      - "If processed with ETL_B --allow-skeleton, skeleton-policy controls loss (default: full_sequence)."
+
+  - dataset_id: agentdojo
+    tier_a_source:
+      path: data/agent_dojo/agentdojo-*.jsonl
+      format: jsonl
+    converter:
+      function: convert_agentdojo_record
+      module: src/schemas/tools/ETL_A.py
+    output:
+      tier: B2
+      completeness: complete
+    record_locator:
+      keys_preference: [index, name, user_task_id, injection_task_id, jsonl_line]
+      rule: first_present
+    messages:
+      - index: "*"
+        role: "from messages[].role"
+        content: "from messages[].content (default empty string)"
+        name: "messages[].name or tool_call.function.name for tool role"
+        tool_calls: "parsed from messages[].tool_calls or messages[].tool_call"
+        tool_call_id: "from messages[].tool_call_id"
+        thinking: "from messages[].thinking"
+        notes:
+          - "For role=tool, tool_calls are cleared (None)."
+          - "Tool call arguments are parsed; string JSON is decoded when possible."
+    labels:
+      generated:
+        is_attack: "metadata.injection_task_id != null"
+        category: "harmful if is_attack else benign"
+        security_outcome: "unsafe if is_attack and security==false else safe"
+        attack_type: "prompt_injection if is_attack else null"
+        attack_succeeded: "is_attack and security==false"
+        capability_category: "suite_name if not is_attack else null"
+    task:
+      generated:
+        family: prompt_injection
+        name: "metadata.suite_name"
+        variant: "metadata.attack_type if present else metadata.injection_task_id"
+    signal_hints:
+      generated:
+        injection_char_span: null
+        expected_tool_name: null
+        observed_tool_name: null
+        notes:
+          - "Injection spans are not computed in ETL_A for AgentDojo."
+    training:
+      generated:
+        sample_weight: 1.0
+        loss_mask_policy: assistant_only
+        mixture.class_id: "agentdojo/injection for harmful, agentdojo/benign for benign"
+    links:
+      passthrough:
+        raw_id: metadata.name
+    generated_fields:
+      - id: "trace_agentdojo_<content_hash>"
+      - created_at: "utc now"
+      - source.dataset: agentdojo
+      - source.tier: raw
+      - source.subset: metadata.suite_name
+      - source.ingest_version: etl_a_v1
+      - split: "from CLI --split"
+      - completeness: complete
+      - tier: B2
+    passthrough_fields:
+      - messages
+      - metadata.suite_name
+      - metadata.user_task_id
+      - metadata.injection_task_id
+      - metadata.success
+      - metadata.security
+      - metadata.model
+      - metadata.attack_type
+      - metadata.hierarchy_path
+      - metadata.name
+    injection_span_rules:
+      - "No injection span computed; remains null unless post-processed."
+    expected_loss_regions:
+      - "assistant_only: loss applies to assistant message spans only."

@@ -24,6 +24,7 @@ class LMPPolicy:
         "assistant_only",
         "completion_only",
         "full_sequence",
+        "cb_full_sequence",
         "tool_calls_only",
         "action_prefix_only",
         "action_commitment",
