@@ -1,6 +1,6 @@
 # Data Pipeline (SLURM)
 
-This directory contains SLURM batch scripts for the complete data pipeline.
+This directory contains SLURM batch scripts for the complete data pipeline, from raw data ingestion through training and evaluation.
 
 ## Pipeline Overview
 
@@ -24,18 +24,32 @@ Raw Data (Tier A)
                                                     ├──► render_v1
                                                     │
                                                     └──► lossmask_v1
+                                                              │
+                                                              v
+                                                    04_train.sbatch
+                                                              │
+                                                              v
+                                                    05_eval.sbatch
+                                                              │
+                                                              v
+                                                    eval_results.json
 ```
 
 ## Quick Start
 
 ```bash
-# Run the full pipeline
+# Run the full pipeline (data + training + eval)
 sbatch slurm/pipeline/full_pipeline.sbatch
 
 # Or run stages individually
 sbatch slurm/pipeline/01_load_data.sbatch
 sbatch slurm/pipeline/02_fill_skeletons.sbatch
 sbatch slurm/pipeline/03_lossmask.sbatch
+sbatch slurm/pipeline/04_train.sbatch
+sbatch slurm/pipeline/05_eval.sbatch
+
+# Skip data processing if already done
+SKIP_LOAD=true SKIP_FILL=true SKIP_LOSSMASK=true sbatch slurm/pipeline/full_pipeline.sbatch
 ```
 
 ## Stage Scripts
@@ -147,45 +161,161 @@ INPUT_TRACES=/path/to/custom.jsonl sbatch slurm/pipeline/03_lossmask.sbatch
 MWCS_SCHEDULE=/path/to/schedule.yaml MWCS_STEP=1000 sbatch slurm/pipeline/03_lossmask.sbatch
 ```
 
-### full_pipeline.sbatch
+### 04_train.sbatch (train_schema.py)
 
-Runs all three stages sequentially in a single allocation.
+Trains Circuit Breaker model using Representation Rerouting:
+- Loads render_v1 and lossmask_v1 from ETL_B
+- DS traces as harmful examples (rerouting loss)
+- DR traces as benign examples (retain loss)
+- Outputs LoRA adapter checkpoints
 
 **Environment Variables:**
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `DATA_MODE` | `ds_dr` | Data mode: `ds_dr`, `labeled`, or `mixed` |
+| `DS_RENDERS` | `fujitsu_b4_ds.jsonl` | DS renders JSONL |
+| `DS_LOSSMASKS` | `fujitsu_b4_ds.jsonl` | DS lossmasks JSONL |
+| `DR_RENDERS` | `fujitsu_b4_dr.jsonl` | DR renders JSONL |
+| `DR_LOSSMASKS` | `fujitsu_b4_dr.jsonl` | DR lossmasks JSONL |
+| `OUTPUT_DIR` | `$CB_SCRATCH/models/cb_train_<timestamp>` | Output directory |
+| `MODEL_PRESET` | `llama-3.1-8b-instruct` | Config preset |
+| `MODEL` | (from preset) | Override base model |
+| `TOTAL_STEPS` | `300` | Training steps |
+| `BATCH_SIZE` | `8` | Per-GPU batch size |
+| `LEARNING_RATE` | `5e-5` | Learning rate |
+| `WARMUP_STEPS` | `20` | Warmup steps |
+| `ALPHA_MAX` | `10.0` | Initial alpha for RR loss |
+| `CB_LAYERS` | `10,20` | CB target layers (comma-separated) |
+| `LOSS_WEIGHTING` | `dual` | Loss weighting: `single_alpha` or `dual` |
+| `LORA_R` | `16` | LoRA rank |
+| `LORA_ALPHA` | `32` | LoRA alpha |
+| `WANDB_PROJECT` | `circuit-breakers` | W&B project name |
+| `NO_WANDB` | `false` | Disable W&B logging |
+
+**Data Loading Modes:**
+- `ds_dr` - DS traces as harmful, DR traces as benign (default)
+- `labeled` - Split by `labels.is_harmful` field
+- `mixed` - Explicit harmful/benign render/lossmask paths
+
+**Examples:**
+```bash
+# Train with defaults
+sbatch slurm/pipeline/04_train.sbatch
+
+# Custom training hyperparameters
+TOTAL_STEPS=500 ALPHA_MAX=8.0 LEARNING_RATE=3e-5 sbatch slurm/pipeline/04_train.sbatch
+
+# Disable W&B logging
+NO_WANDB=true sbatch slurm/pipeline/04_train.sbatch
+
+# Custom target layers
+CB_LAYERS=8,16,24 sbatch slurm/pipeline/04_train.sbatch
+```
+
+### 05_eval.sbatch (eval.py)
+
+Evaluates trained CB model against baseline:
+- Tool-flip ASR (primary metric)
+- Forced function call ASR
+- Capability retention
+- Stage 1 gate pass/fail
+
+**Environment Variables:**
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CB_MODEL_DIR` | (latest in models/) | Path to trained CB model |
+| `BASELINE_MODEL` | `meta-llama/Llama-3.1-8B-Instruct` | Baseline for comparison |
+| `EVAL_DATA` | `fujitsu_b4_ds.jsonl` | Evaluation data JSONL |
+| `TOOL_SCHEMA` | `configs/tool_schemas/b4_standard_v1.json` | Tool schema |
+| `OUTPUT_DIR` | `$CB_SCRATCH/eval` | Output directory |
+| `OUTPUT_NAME` | `eval_<timestamp>.json` | Result file name |
+| `NUM_WORKERS` | `4` | Parallel workers |
+| `GPU_IDS` | `0,1,2,3` | GPU IDs for workers |
+| `LIMIT` | (none) | Limit eval samples |
+| `FAIL_ON_GATE` | `false` | Exit with error if gates fail |
+| `NO_DETAILS` | `false` | Don't save per-sample details |
+
+**Stage 1 Gates:**
+- ASR Relative Reduction ≥ 50%
+- Capability Retention > 85%
+- Output Difference > 10%
+
+**Examples:**
+```bash
+# Evaluate latest model
+sbatch slurm/pipeline/05_eval.sbatch
+
+# Evaluate specific model
+CB_MODEL_DIR=/path/to/model/final sbatch slurm/pipeline/05_eval.sbatch
+
+# Quick test with limited samples
+LIMIT=100 sbatch slurm/pipeline/05_eval.sbatch
+
+# Fail job if gates don't pass
+FAIL_ON_GATE=true sbatch slurm/pipeline/05_eval.sbatch
+```
+
+### full_pipeline.sbatch
+
+Runs all five stages sequentially in a single allocation.
+
+**Pipeline Control Variables:**
+| Variable | Default | Description |
+|----------|---------|-------------|
 | `SKIP_LOAD` | `false` | Skip stage 1 if traces exist |
 | `SKIP_FILL` | `false` | Skip stage 2 if completions exist |
+| `SKIP_LOSSMASK` | `false` | Skip stage 3 if lossmasks exist |
+| `SKIP_TRAIN` | `false` | Skip stage 4 training |
+| `SKIP_EVAL` | `false` | Skip stage 5 evaluation |
 | `OUTPUT_BASE` | `$CB_SCRATCH/data` | Base output directory |
 
 All stage-specific variables are also supported (see individual stages above).
 
-**Example:**
+**Examples:**
 ```bash
 # Run full pipeline with custom model
 MODEL=meta-llama/Llama-3.1-70B-Instruct TENSOR_PARALLEL=4 sbatch slurm/pipeline/full_pipeline.sbatch
 
-# Skip loading if traces already exist
-SKIP_LOAD=true sbatch slurm/pipeline/full_pipeline.sbatch
+# Skip data processing if already done
+SKIP_LOAD=true SKIP_FILL=true SKIP_LOSSMASK=true sbatch slurm/pipeline/full_pipeline.sbatch
+
+# Run only training and eval (data exists)
+SKIP_LOAD=true SKIP_FILL=true SKIP_LOSSMASK=true sbatch slurm/pipeline/full_pipeline.sbatch
+
+# Run only data pipeline (no training)
+SKIP_TRAIN=true SKIP_EVAL=true sbatch slurm/pipeline/full_pipeline.sbatch
+
+# Custom training hyperparameters
+TOTAL_STEPS=500 ALPHA_MAX=8.0 sbatch slurm/pipeline/full_pipeline.sbatch
 ```
 
 ## Output Structure
 
 ```
-$CB_SCRATCH/data/
-├── traces/
-│   ├── fujitsu_b4_skeletons.jsonl   # B1 skeletons (from ETL_A)
-│   ├── fujitsu_b4_ds.jsonl           # DS completions (harmful)
-│   ├── fujitsu_b4_dr.jsonl           # DR completions (benign)
-│   └── agentdojo_complete.jsonl      # B2 complete (from all AgentDojo files)
-├── renders/
-│   ├── fujitsu_b4_ds.jsonl           # Tokenized renders
-│   ├── fujitsu_b4_dr.jsonl
-│   └── agentdojo_complete.jsonl
-└── lossmasks/
-    ├── fujitsu_b4_ds.jsonl           # Loss masks (training-ready)
-    ├── fujitsu_b4_dr.jsonl
-    └── agentdojo_complete.jsonl
+$CB_SCRATCH/
+├── data/
+│   ├── traces/
+│   │   ├── fujitsu_b4_skeletons.jsonl   # B1 skeletons (from ETL_A)
+│   │   ├── fujitsu_b4_ds.jsonl           # DS completions (harmful)
+│   │   ├── fujitsu_b4_dr.jsonl           # DR completions (benign)
+│   │   └── agentdojo_complete.jsonl      # B2 complete (from all AgentDojo files)
+│   ├── renders/
+│   │   ├── fujitsu_b4_ds.jsonl           # Tokenized renders
+│   │   ├── fujitsu_b4_dr.jsonl
+│   │   └── agentdojo_complete.jsonl
+│   └── lossmasks/
+│       ├── fujitsu_b4_ds.jsonl           # Loss masks (training-ready)
+│       ├── fujitsu_b4_dr.jsonl
+│       └── agentdojo_complete.jsonl
+├── models/
+│   └── cb_train_<timestamp>/
+│       ├── checkpoint-50/                 # Intermediate checkpoints
+│       ├── checkpoint-100/
+│       └── final/                         # Final trained model
+└── eval/
+    ├── eval_<timestamp>.json              # Evaluation results
+    ├── eval_<timestamp>.details.jsonl     # Per-sample details
+    └── eval_<timestamp>.paired_outputs.jsonl  # Baseline vs CB comparison
 ```
 
 ## Dependencies
@@ -205,4 +335,6 @@ Logs are written to `$CB_SCRATCH/logs/` with format `{job_name}_{job_id}.{out,er
 - Stage 1 (01_load_data) automatically discovers all `agentdojo-*.jsonl` files in `data/agent_dojo/` and concatenates them before processing
 - Stage 2 (02_fill_skeletons) generates DS and/or DR traces based on the `MODE` variable
 - Stage 3 (03_lossmask) can process multiple trace files (comma-separated) in a single run
-- The full_pipeline script runs stages sequentially using bash (SLURM #SBATCH directives are ignored)
+- Stage 4 (04_train) supports distributed training via PyTorch DDP
+- Stage 5 (05_eval) supports multi-GPU parallel evaluation
+- The full_pipeline script runs stages sequentially using bash (SLURM #SBATCH directives are ignored for subscripts)
