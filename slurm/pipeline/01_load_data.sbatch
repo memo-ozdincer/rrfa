@@ -21,7 +21,7 @@
 #
 # Configuration via environment variables:
 #   FUJITSU_B4_PATH - Path to Fujitsu B4 orchestrator attacks JSONL
-#   AGENTDOJO_PATH  - Path to AgentDojo JSONL file
+#   AGENTDOJO_DIR   - Directory containing agentdojo-*.jsonl files (auto-discovered)
 #   OUTPUT_DIR      - Directory for output traces (default: $CB_SCRATCH/data/traces)
 #   SPLIT           - Split assignment (default: train)
 #
@@ -29,7 +29,8 @@
 #   sbatch slurm/pipeline/01_load_data.sbatch
 #
 # Or with custom paths:
-#   FUJITSU_B4_PATH=/path/to/data.jsonl sbatch slurm/pipeline/01_load_data.sbatch
+#   FUJITSU_B4_PATH=/path/to/attacks.jsonl sbatch slurm/pipeline/01_load_data.sbatch
+#   AGENTDOJO_DIR=/path/to/agentdojo/dir sbatch slurm/pipeline/01_load_data.sbatch
 #
 # =============================================================================
 
@@ -76,7 +77,7 @@ echo ""
 # =============================================================================
 # Default paths - override via environment variables
 FUJITSU_B4_PATH="${FUJITSU_B4_PATH:-$REPO_DIR/data/fujitsu/orchestrator_attacks_combined_deduplicated.jsonl}"
-AGENTDOJO_PATH="${AGENTDOJO_PATH:-}"
+AGENTDOJO_DIR="${AGENTDOJO_DIR:-$REPO_DIR/data/agent_dojo}"
 OUTPUT_DIR="${OUTPUT_DIR:-$CB_SCRATCH/data/traces}"
 SPLIT="${SPLIT:-train}"
 
@@ -84,7 +85,7 @@ mkdir -p "$OUTPUT_DIR"
 
 echo "Configuration:"
 echo "  FUJITSU_B4_PATH: $FUJITSU_B4_PATH"
-echo "  AGENTDOJO_PATH: $AGENTDOJO_PATH"
+echo "  AGENTDOJO_DIR: $AGENTDOJO_DIR"
 echo "  OUTPUT_DIR: $OUTPUT_DIR"
 echo "  SPLIT: $SPLIT"
 echo ""
@@ -104,19 +105,9 @@ elif [[ -n "$FUJITSU_B4_PATH" ]]; then
     echo "WARNING: Fujitsu B4 path specified but file not found: $FUJITSU_B4_PATH"
 fi
 
-# Add AgentDojo if path exists
-if [[ -n "$AGENTDOJO_PATH" && -f "$AGENTDOJO_PATH" ]]; then
-    echo "Found AgentDojo data: $AGENTDOJO_PATH"
-    echo "  Lines: $(wc -l < "$AGENTDOJO_PATH")"
-    ETL_A_ARGS="$ETL_A_ARGS --agentdojo $AGENTDOJO_PATH"
-    AGENTDOJO_OUTPUT="$OUTPUT_DIR/agentdojo_complete.jsonl"
-elif [[ -n "$AGENTDOJO_PATH" ]]; then
-    echo "WARNING: AgentDojo path specified but file not found: $AGENTDOJO_PATH"
-fi
-
 if [[ -z "$ETL_A_ARGS" ]]; then
     echo "ERROR: No input data files found!"
-    echo "Please set FUJITSU_B4_PATH and/or AGENTDOJO_PATH environment variables."
+    echo "Fujitsu B4 not found: $FUJITSU_B4_PATH"
     exit 1
 fi
 
@@ -144,22 +135,50 @@ if [[ -n "$FUJITSU_B4_PATH" && -f "$FUJITSU_B4_PATH" ]]; then
     echo ""
 fi
 
-# Process AgentDojo
-if [[ -n "$AGENTDOJO_PATH" && -f "$AGENTDOJO_PATH" ]]; then
+# Process all AgentDojo files in directory
+if [[ -d "$AGENTDOJO_DIR" ]]; then
     echo "========================================"
     echo "Converting AgentDojo -> B2 Complete"
     echo "========================================"
 
-    python src/schemas/tools/ETL_A.py \
-        --agentdojo "$AGENTDOJO_PATH" \
-        --output "$OUTPUT_DIR/agentdojo_complete.jsonl" \
-        --split "$SPLIT"
+    # Find all agentdojo-*.jsonl files
+    AGENTDOJO_FILES=("$AGENTDOJO_DIR"/agentdojo-*.jsonl)
 
-    echo ""
-    echo "AgentDojo conversion complete!"
-    echo "  Output: $OUTPUT_DIR/agentdojo_complete.jsonl"
-    echo "  Lines: $(wc -l < "$OUTPUT_DIR/agentdojo_complete.jsonl")"
-    echo ""
+    if [[ ${#AGENTDOJO_FILES[@]} -gt 0 && -f "${AGENTDOJO_FILES[0]}" ]]; then
+        # Temporary file to concatenate all AgentDojo files
+        AGENTDOJO_TEMP="$OUTPUT_DIR/agentdojo_temp.jsonl"
+        > "$AGENTDOJO_TEMP"  # Create empty file
+
+        echo "Found AgentDojo files:"
+        for agentdojo_file in "${AGENTDOJO_FILES[@]}"; do
+            if [[ -f "$agentdojo_file" ]]; then
+                echo "  - $agentdojo_file ($(wc -l < "$agentdojo_file") lines)"
+                cat "$agentdojo_file" >> "$AGENTDOJO_TEMP"
+            fi
+        done
+
+        echo ""
+        echo "Processing $(wc -l < "$AGENTDOJO_TEMP") total AgentDojo records..."
+
+        python src/schemas/tools/ETL_A.py \
+            --agentdojo "$AGENTDOJO_TEMP" \
+            --output "$OUTPUT_DIR/agentdojo_complete.jsonl" \
+            --split "$SPLIT"
+
+        # Clean up temp file
+        rm -f "$AGENTDOJO_TEMP"
+
+        echo ""
+        echo "AgentDojo conversion complete!"
+        echo "  Output: $OUTPUT_DIR/agentdojo_complete.jsonl"
+        echo "  Lines: $(wc -l < "$OUTPUT_DIR/agentdojo_complete.jsonl")"
+        echo ""
+    else
+        echo "WARNING: No AgentDojo files found in $AGENTDOJO_DIR"
+        echo "Looking for: agentdojo-*.jsonl"
+    fi
+else
+    echo "WARNING: AgentDojo directory not found: $AGENTDOJO_DIR"
 fi
 
 # =============================================================================

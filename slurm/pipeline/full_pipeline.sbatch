@@ -54,10 +54,10 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="/project/def-zhijing/memoozd"
 CB_SCRATCH="/scratch/memoozd/cb-scratch"
 REPO_DIR="$PROJECT_DIR/rrfa"
+SCRIPT_DIR="$REPO_DIR/slurm/pipeline"
 
 echo "========================================"
 echo "FULL DATA PIPELINE"
@@ -83,7 +83,7 @@ SKIP_FILL="${SKIP_FILL:-false}"
 
 # Default data paths
 FUJITSU_B4_PATH="${FUJITSU_B4_PATH:-$REPO_DIR/data/fujitsu/orchestrator_attacks_combined_deduplicated.jsonl}"
-AGENTDOJO_PATH="${AGENTDOJO_PATH:-}"
+AGENTDOJO_DIR="${AGENTDOJO_DIR:-$REPO_DIR/data/agent_dojo}"
 
 # Model/tokenizer settings
 MODEL="${MODEL:-meta-llama/Llama-3.1-8B-Instruct}"
@@ -130,7 +130,7 @@ else
     echo "========================================"
 
     export FUJITSU_B4_PATH
-    export AGENTDOJO_PATH
+    export AGENTDOJO_DIR
     export OUTPUT_DIR="$TRACES_DIR"
     export SPLIT="train"
 

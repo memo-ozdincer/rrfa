@@ -16,14 +16,14 @@ Raw Data (Tier A)
       │                                        │
       │                                        └──► DR traces (benign)
       │
-      └──► B2 Complete (AgentDojo) ────────────────────┐
-                                                        │
-                                                        v
-                                              03_lossmask.sbatch (ETL_B)
-                                                        │
-                                                        ├──► render_v1
-                                                        │
-                                                        └──► lossmask_v1
+      └──► B2 Complete (AgentDojo - all files) ────┐
+                                                    │
+                                                    v
+                                          03_lossmask.sbatch (ETL_B)
+                                                    │
+                                                    ├──► render_v1
+                                                    │
+                                                    └──► lossmask_v1
 ```
 
 ## Quick Start
@@ -44,19 +44,28 @@ sbatch slurm/pipeline/03_lossmask.sbatch
 
 Converts raw Tier A data to trace_v1 format:
 - Fujitsu B4 → B1 skeleton traces (no assistant messages)
-- AgentDojo → B2 complete traces (ready for ETL_B)
+- All AgentDojo files in directory → B2 complete traces (ready for ETL_B)
+
+Automatically discovers and processes all `agentdojo-*.jsonl` files in the AgentDojo directory.
 
 **Environment Variables:**
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `FUJITSU_B4_PATH` | `data/fujitsu/orchestrator_attacks...` | Fujitsu B4 JSONL file |
-| `AGENTDOJO_PATH` | (none) | AgentDojo JSONL file |
+| `AGENTDOJO_DIR` | `data/agent_dojo` | Directory containing all `agentdojo-*.jsonl` files |
 | `OUTPUT_DIR` | `$CB_SCRATCH/data/traces` | Output directory |
 | `SPLIT` | `train` | Split assignment |
 
 **Example:**
 ```bash
+# Process with defaults (auto-discovers all AgentDojo files)
+sbatch slurm/pipeline/01_load_data.sbatch
+
+# Custom Fujitsu B4 path
 FUJITSU_B4_PATH=/path/to/attacks.jsonl sbatch slurm/pipeline/01_load_data.sbatch
+
+# Custom AgentDojo directory
+AGENTDOJO_DIR=/path/to/agentdojo/dir sbatch slurm/pipeline/01_load_data.sbatch
 ```
 
 ### 02_fill_skeletons.sbatch (generate_completions.py)
@@ -90,7 +99,7 @@ MODE=ds sbatch slurm/pipeline/02_fill_skeletons.sbatch
 # Generate with lower temperature
 TEMPERATURE_DS=0.5 TEMPERATURE_DR=0.2 sbatch slurm/pipeline/02_fill_skeletons.sbatch
 
-# Use more GPUs
+# Use more GPUs for tensor parallelism
 TENSOR_PARALLEL=4 sbatch slurm/pipeline/02_fill_skeletons.sbatch
 ```
 
@@ -142,12 +151,14 @@ MWCS_SCHEDULE=/path/to/schedule.yaml MWCS_STEP=1000 sbatch slurm/pipeline/03_los
 
 Runs all three stages sequentially in a single allocation.
 
-**Additional Environment Variables:**
+**Environment Variables:**
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SKIP_LOAD` | `false` | Skip stage 1 if traces exist |
 | `SKIP_FILL` | `false` | Skip stage 2 if completions exist |
 | `OUTPUT_BASE` | `$CB_SCRATCH/data` | Base output directory |
+
+All stage-specific variables are also supported (see individual stages above).
 
 **Example:**
 ```bash
@@ -166,7 +177,7 @@ $CB_SCRATCH/data/
 │   ├── fujitsu_b4_skeletons.jsonl   # B1 skeletons (from ETL_A)
 │   ├── fujitsu_b4_ds.jsonl           # DS completions (harmful)
 │   ├── fujitsu_b4_dr.jsonl           # DR completions (benign)
-│   └── agentdojo_complete.jsonl      # B2 complete (from ETL_A)
+│   └── agentdojo_complete.jsonl      # B2 complete (from all AgentDojo files)
 ├── renders/
 │   ├── fujitsu_b4_ds.jsonl           # Tokenized renders
 │   ├── fujitsu_b4_dr.jsonl
@@ -188,3 +199,10 @@ All scripts expect:
 ## Logs
 
 Logs are written to `$CB_SCRATCH/logs/` with format `{job_name}_{job_id}.{out,err}`.
+
+## Notes
+
+- Stage 1 (01_load_data) automatically discovers all `agentdojo-*.jsonl` files in `data/agent_dojo/` and concatenates them before processing
+- Stage 2 (02_fill_skeletons) generates DS and/or DR traces based on the `MODE` variable
+- Stage 3 (03_lossmask) can process multiple trace files (comma-separated) in a single run
+- The full_pipeline script runs stages sequentially using bash (SLURM #SBATCH directives are ignored)
