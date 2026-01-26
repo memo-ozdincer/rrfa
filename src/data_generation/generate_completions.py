@@ -82,6 +82,8 @@ from src.schemas.trace import (
     Message,
     ToolCall,
     ToolCallFunction,
+    RawMetadata,
+    SignalHints,
 )
 
 logging.basicConfig(
@@ -126,6 +128,37 @@ def get_tools_list(schema: Dict[str, Any]) -> List[Dict[str, Any]]:
 def get_system_prompt(schema: Dict[str, Any]) -> str:
     """Extract system prompt from schema."""
     return schema.get("system_prompt", "You are a helpful assistant with access to tools.")
+
+
+def detect_model_family(model_path: str) -> str:
+    """Detect model family from model path for format tracking."""
+    model_lower = model_path.lower()
+    if "llama" in model_lower:
+        return "llama"
+    if "claude" in model_lower or "anthropic" in model_lower:
+        return "claude"
+    if "gpt" in model_lower or "openai" in model_lower:
+        return "gpt"
+    if "gemini" in model_lower:
+        return "gemini"
+    if "mistral" in model_lower:
+        return "mistral"
+    if "qwen" in model_lower:
+        return "qwen"
+    return "unknown"
+
+
+def detect_format_family(model_family: str) -> str:
+    """Detect tool call format family from model family."""
+    format_map = {
+        "llama": "llama_python_tag",
+        "claude": "anthropic_xml",
+        "gpt": "openai_json",
+        "gemini": "google_json",
+        "mistral": "mistral_json",
+        "qwen": "qwen_json",
+    }
+    return format_map.get(model_family, "generic_json")
 
 
 # =============================================================================
@@ -405,13 +438,92 @@ def generate_with_tools(
 # Tool Call Extraction and Validation
 # =============================================================================
 
-def extract_tool_call(response: str) -> Optional[Dict[str, Any]]:
-    """Extract tool call from assistant response."""
+def strip_tool_syntax_from_content(content: str, format_family: Optional[str] = None) -> str:
+    """
+    Strip tool call syntax from assistant content, leaving only reasoning text.
+
+    This enables truly format-agnostic storage where content contains only
+    natural language reasoning, and tool calls are stored separately as structured data.
+
+    Args:
+        content: Full assistant response (may contain reasoning + tool call syntax)
+        format_family: Tool call format family (auto-detected if None)
+
+    Returns:
+        Just the reasoning text, with tool call syntax stripped
+    """
+    if not content:
+        return content
+
+    # Auto-detect format if not provided
+    if format_family is None:
+        if "<|python_tag|>" in content:
+            format_family = "llama_python_tag"
+        elif "<function_calls>" in content or "<invoke>" in content:
+            format_family = "anthropic_xml"
+        elif content.strip().startswith("{") and ('"name"' in content or '"function"' in content):
+            format_family = "openai_json"
+
+    # Strip based on detected format
+    if format_family == "llama_python_tag":
+        # For Llama: Split on <|python_tag|> and take only the part before it
+        if "<|python_tag|>" in content:
+            reasoning = content.split("<|python_tag|>", 1)[0].strip()
+            return reasoning
+    elif format_family == "anthropic_xml":
+        # For Claude: Remove <function_calls>...</function_calls> or <invoke>...</invoke>
+        import re
+        reasoning = re.sub(r'<function_calls>.*?</function_calls>', '', content, flags=re.DOTALL)
+        reasoning = re.sub(r'<invoke>.*?</invoke>', '', reasoning, flags=re.DOTALL)
+        return reasoning.strip()
+    elif format_family == "openai_json":
+        # For OpenAI: If content is just JSON, return empty string (tool call only, no reasoning)
+        # Otherwise, content is clean already (OpenAI separates content from tool_calls)
+        if content.strip().startswith("{") and content.strip().endswith("}"):
+            try:
+                json.loads(content)
+                return ""  # Pure tool call, no reasoning
+            except json.JSONDecodeError:
+                pass
+
+    # If no tool syntax detected, return as-is
+    return content
+
+
+def extract_tool_call(response: str, strip_reasoning: bool = False) -> Optional[Dict[str, Any]]:
+    """
+    Extract tool call from assistant response.
+
+    Args:
+        response: Full assistant response (may contain reasoning + tool call)
+        strip_reasoning: If True, also return reasoning_text separately
+
+    Returns dict with keys:
+    - name: Tool name
+    - parameters: Parsed arguments dict
+    - arguments_json: Raw arguments string (for re-serialization)
+    - raw_content: The entire tool call string (for exact replay)
+    - reasoning_text: (if strip_reasoning=True) Text before tool call
+    """
     if "<|python_tag|>" in response:
+        # Extract reasoning text if requested
+        reasoning_text = None
+        if strip_reasoning:
+            reasoning_text = response.split("<|python_tag|>", 1)[0].strip()
+
+        # Extract the full tool call content after python_tag
         content = response.split("<|python_tag|>", 1)[1]
+        raw_tool_content = content  # Before trimming end tokens
         for end_token in ["<|eom_id|>", "<|eot_id|>", "</s>", "<|end_of_text|>"]:
             content = content.split(end_token)[0]
         content = content.strip()
+
+        # Capture raw content including python_tag
+        raw_content = "<|python_tag|>" + raw_tool_content.split("<|eom_id|>")[0].split("<|eot_id|>")[0]
+        if "<|eom_id|>" in response:
+            raw_content += "<|eom_id|>"
+        elif "<|eot_id|>" in response:
+            raw_content += "<|eot_id|>"
 
         match = re.match(r'(\w+)\s*\((.*)\)', content, re.DOTALL)
         if match:
@@ -423,19 +535,52 @@ def extract_tool_call(response: str) -> Optional[Dict[str, Any]]:
                     args = {}
                     for part in re.findall(r"(\w+)\s*=\s*['\"]([^'\"]*)['\"]", args_str):
                         args[part[0]] = part[1]
-                    return {"name": tool_name, "parameters": args}
+                    result = {
+                        "name": tool_name,
+                        "parameters": args,
+                        "arguments_json": args_str,
+                        "raw_content": raw_content,
+                    }
+                    if strip_reasoning:
+                        result["reasoning_text"] = reasoning_text
+                    return result
                 else:
                     args = json.loads(args_str) if args_str else {}
-                    return {"name": tool_name, "parameters": args}
+                    result = {
+                        "name": tool_name,
+                        "parameters": args,
+                        "arguments_json": args_str,
+                        "raw_content": raw_content,
+                    }
+                    if strip_reasoning:
+                        result["reasoning_text"] = reasoning_text
+                    return result
             except (json.JSONDecodeError, ValueError):
-                return {"name": tool_name, "parameters": {"raw": args_str}}
+                result = {
+                    "name": tool_name,
+                    "parameters": {"raw": args_str},
+                    "arguments_json": args_str,
+                    "raw_content": raw_content,
+                }
+                if strip_reasoning:
+                    result["reasoning_text"] = reasoning_text
+                return result
 
         try:
             data = json.loads(content)
             name = data.get("name") or data.get("function", {}).get("name")
             params = data.get("parameters") or data.get("arguments") or {}
+            args_json = json.dumps(params, ensure_ascii=False)
             if name:
-                return {"name": name, "parameters": params}
+                result = {
+                    "name": name,
+                    "parameters": params,
+                    "arguments_json": args_json,
+                    "raw_content": raw_content,
+                }
+                if strip_reasoning:
+                    result["reasoning_text"] = reasoning_text
+                return result
         except json.JSONDecodeError:
             pass
 
@@ -458,8 +603,14 @@ def extract_tool_call(response: str) -> Optional[Dict[str, Any]]:
             data = json.loads(json_str)
             name = data.get("name") or data.get("function", {}).get("name")
             params = data.get("parameters") or data.get("arguments") or {}
+            args_json = json.dumps(params, ensure_ascii=False)
             if name:
-                return {"name": name, "parameters": params}
+                return {
+                    "name": name,
+                    "parameters": params,
+                    "arguments_json": args_json,
+                    "raw_content": json_str,  # The raw JSON object
+                }
         except (json.JSONDecodeError, ValueError):
             pass
 
@@ -525,6 +676,9 @@ def build_ds_from_skeletons(
     n_other_tool: int = 5,
     n_format_errors: int = 5,
     debug: bool = False,  # DEBUG FLAG
+    model_id: Optional[str] = None,  # Model identifier for source tracking
+    tool_schema_ref: Optional[Dict[str, str]] = None,  # Tool schema version info
+    strip_tool_syntax: bool = True,  # NEW: Format-agnostic mode
 ) -> Tuple[List[Trace], Dict[str, Any]]:
     """
     Build DS (successful flips) from skeleton traces.
@@ -541,11 +695,17 @@ def build_ds_from_skeletons(
         system_prompt: System prompt to use
         temperature: Generation temperature
         verbose: Print progress
+        model_id: Model identifier for source tracking
+        tool_schema_ref: Tool schema reference (version, digest)
 
     Returns:
         (ds_traces, stats) tuple
     """
     ds_traces = []
+
+    # Detect model family and format for source tracking
+    model_family = detect_model_family(model_id) if model_id else None
+    format_family = detect_format_family(model_family) if model_family else None
 
     stats = {
         "total": 0,
@@ -631,9 +791,14 @@ def build_ds_from_skeletons(
         # Fix formatting
         response = fix_assistant_raw_format(response)
 
-        # Extract tool call
-        tool_call = extract_tool_call(response)
+        # Extract tool call (with optional reasoning separation)
+        tool_call = extract_tool_call(response, strip_reasoning=strip_tool_syntax)
         observed_tool = tool_call["name"] if tool_call else None
+
+        # Extract clean reasoning text if format-agnostic mode enabled
+        assistant_content = response
+        if strip_tool_syntax and tool_call and "reasoning_text" in tool_call:
+            assistant_content = tool_call["reasoning_text"]
 
         # DEBUG: Print extracted tool and comparison
         if debug and debug_count < debug_limit:
@@ -641,6 +806,8 @@ def build_ds_from_skeletons(
             logger.info(f"  -> Extracted observed_tool: {observed_tool}")
             logger.info(f"  Comparison: observed({observed_tool}) == simulated({simulated_tool}) ? {observed_tool == simulated_tool}")
             logger.info(f"  Comparison: observed({observed_tool}) == expected({expected_tool}) ? {observed_tool == expected_tool}")
+            if strip_tool_syntax:
+                logger.info(f"  Format-agnostic content (reasoning only): {assistant_content[:100]}...")
 
         # Determine outcome (matching generate_ds.py logic)
         if observed_tool is None:
@@ -712,19 +879,21 @@ def build_ds_from_skeletons(
         completed_trace.completeness = "complete"
         completed_trace.tier = "B2"
 
-        # Add assistant message with tool call
+        # Add assistant message with tool call (including raw_content for exact replay)
         tc = None
         if tool_call:
             tc = ToolCall(
                 function=ToolCallFunction(
                     name=tool_call["name"],
                     arguments=tool_call.get("parameters", {}),
+                    arguments_json=tool_call.get("arguments_json"),
+                    raw_content=tool_call.get("raw_content"),  # Preserve raw tool call
                 )
             )
 
         assistant_msg = Message(
             role="assistant",
-            content=response,
+            content=assistant_content,  # Clean reasoning only (if strip_tool_syntax=True)
             tool_calls=[tc] if tc else None,
         )
         completed_trace.messages.append(assistant_msg)
@@ -734,6 +903,27 @@ def build_ds_from_skeletons(
             completed_trace.labels.category = "harmful"
             completed_trace.labels.security_outcome = "unsafe"
             completed_trace.labels.attack_succeeded = True
+
+        # Update signal_hints with raw assistant content and format info
+        if completed_trace.signal_hints is None:
+            completed_trace.signal_hints = SignalHints()
+        completed_trace.signal_hints.raw_assistant_content = response
+        completed_trace.signal_hints.raw_format = format_family
+
+        # Update source with generator model info
+        if completed_trace.source:
+            completed_trace.source.model_id = model_id
+            completed_trace.source.model_family = model_family
+            completed_trace.source.format_family = format_family
+
+        # Store generation parameters in raw_metadata
+        if completed_trace.raw_metadata is None:
+            completed_trace.raw_metadata = RawMetadata()
+        completed_trace.raw_metadata.generation_params = {
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        completed_trace.raw_metadata.tool_schema_ref = tool_schema_ref
 
         # Regenerate ID with new content
         completed_trace.id = Trace.generate_id(
@@ -786,6 +976,9 @@ def build_dr_from_ds(
     n_no_tool: int = 5,
     n_format_errors: int = 5,
     debug: bool = False,  # DEBUG FLAG
+    model_id: Optional[str] = None,  # Model identifier for source tracking
+    tool_schema_ref: Optional[Dict[str, str]] = None,  # Tool schema version info
+    strip_tool_syntax: bool = True,  # NEW: Format-agnostic mode
 ) -> Tuple[List[Trace], Dict[str, Any]]:
     """
     Build DR (paired benign twins) from DS traces.
@@ -803,11 +996,18 @@ def build_dr_from_ds(
         system_prompt: System prompt to use
         temperature: Generation temperature (lower for more consistency)
         verbose: Print progress
+        model_id: Model identifier for source tracking
+        tool_schema_ref: Tool schema reference (version, digest)
+        strip_tool_syntax: If True, store only reasoning text in Message.content
 
     Returns:
         (dr_traces, stats) tuple
     """
     dr_traces = []
+
+    # Detect model family and format for source tracking
+    model_family = detect_model_family(model_id) if model_id else None
+    format_family = detect_format_family(model_family) if model_family else None
 
     stats = {
         "total": 0,
@@ -902,15 +1102,22 @@ def build_dr_from_ds(
         # Fix formatting
         response = fix_assistant_raw_format(response)
 
-        # Extract tool call
-        tool_call = extract_tool_call(response)
+        # Extract tool call (with optional reasoning separation)
+        tool_call = extract_tool_call(response, strip_reasoning=strip_tool_syntax)
         observed_tool = tool_call["name"] if tool_call else None
+
+        # Extract clean reasoning text if format-agnostic mode enabled
+        assistant_content = response
+        if strip_tool_syntax and tool_call and "reasoning_text" in tool_call:
+            assistant_content = tool_call["reasoning_text"]
 
         # DEBUG: Print extracted tool and comparison
         if debug and debug_count < debug_limit:
             logger.info(f"  Model response (first 200 chars): {response[:200]}...")
             logger.info(f"  -> Extracted observed_tool: {observed_tool}")
             logger.info(f"  Comparison: observed({observed_tool}) == expected({expected_tool}) ? {observed_tool == expected_tool}")
+            if strip_tool_syntax:
+                logger.info(f"  Format-agnostic content (reasoning only): {assistant_content[:100]}...")
 
         # Determine outcome (matching generate_dr.py logic)
         if observed_tool is None:
@@ -980,19 +1187,21 @@ def build_dr_from_ds(
             if msg.role == "user":
                 completed_trace.messages[i].content = messages[i]["content"]
 
-        # Add assistant message with tool call
+        # Add assistant message with tool call (including raw_content for exact replay)
         tc = None
         if tool_call:
             tc = ToolCall(
                 function=ToolCallFunction(
                     name=tool_call["name"],
                     arguments=tool_call.get("parameters", {}),
+                    arguments_json=tool_call.get("arguments_json"),
+                    raw_content=tool_call.get("raw_content"),  # Preserve raw tool call
                 )
             )
 
         assistant_msg = Message(
             role="assistant",
-            content=response,
+            content=assistant_content,  # Clean reasoning only (if strip_tool_syntax=True)
             tool_calls=[tc] if tc else None,
         )
         completed_trace.messages.append(assistant_msg)
@@ -1003,12 +1212,30 @@ def build_dr_from_ds(
             completed_trace.labels.security_outcome = "safe"
             completed_trace.labels.attack_succeeded = False
 
-        # Clear signal_hints injection span (injection removed)
-        if completed_trace.signal_hints:
-            completed_trace.signal_hints.injection_char_span = None
+        # Update signal_hints: clear injection span (removed) but add raw assistant content
+        if completed_trace.signal_hints is None:
+            completed_trace.signal_hints = SignalHints()
+        completed_trace.signal_hints.injection_char_span = None
+        completed_trace.signal_hints.raw_assistant_content = response
+        completed_trace.signal_hints.raw_format = format_family
 
         # Clear tool_attack (benign version)
         completed_trace.tool_attack = None
+
+        # Update source with generator model info
+        if completed_trace.source:
+            completed_trace.source.model_id = model_id
+            completed_trace.source.model_family = model_family
+            completed_trace.source.format_family = format_family
+
+        # Store generation parameters in raw_metadata
+        if completed_trace.raw_metadata is None:
+            completed_trace.raw_metadata = RawMetadata()
+        completed_trace.raw_metadata.generation_params = {
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        completed_trace.raw_metadata.tool_schema_ref = tool_schema_ref
 
         # Update mixture class
         if completed_trace.training and completed_trace.training.mixture:
@@ -1190,6 +1417,17 @@ def main():
 
     # Other Options
     parser.add_argument(
+        "--output-format",
+        choices=["standardized"],
+        default="standardized",
+        help="Output format (currently only 'standardized' trace_v1 is supported)",
+    )
+    parser.add_argument(
+        "--normalize-tool-calls",
+        action="store_true",
+        help="Convert any tool call format to standardized {'name':..., 'parameters':...} JSON",
+    )
+    parser.add_argument(
         "--limit", type=int, default=None,
         help="Limit number of traces to process",
     )
@@ -1262,6 +1500,20 @@ def main():
         help="Enable debug logging for first N samples (shows field values and comparisons)",
     )
 
+    # Format-agnostic mode
+    parser.add_argument(
+        "--strip-tool-syntax",
+        action="store_true",
+        default=True,
+        help="Strip tool call syntax from Message.content, storing only reasoning text (default: True for format-agnostic storage)",
+    )
+    parser.add_argument(
+        "--no-strip-tool-syntax",
+        action="store_false",
+        dest="strip_tool_syntax",
+        help="Keep full response with tool call syntax in Message.content (legacy behavior)",
+    )
+
     args = parser.parse_args()
 
     # Validate arguments
@@ -1280,6 +1532,14 @@ def main():
     schema = load_tool_schema(args.tool_schema)
     tools = get_tools_list(schema)
     system_prompt = get_system_prompt(schema)
+
+    # Create tool schema reference for provenance tracking
+    import hashlib
+    schema_json = json.dumps(schema, sort_keys=True)
+    tool_schema_ref = {
+        "version": schema.get("version", "unknown"),
+        "digest": hashlib.sha256(schema_json.encode()).hexdigest()[:16],
+    }
 
     # Initialize backend
     if args.use_vllm:
@@ -1320,6 +1580,9 @@ def main():
             n_other_tool=args.n_other_tool,
             n_format_errors=args.n_format_errors,
             debug=args.debug,
+            model_id=args.model,
+            tool_schema_ref=tool_schema_ref,
+            strip_tool_syntax=args.strip_tool_syntax,
         )
 
         # Write DS output
@@ -1365,6 +1628,9 @@ def main():
             n_no_tool=args.n_no_tool,
             n_format_errors=args.n_format_errors,
             debug=args.debug,
+            model_id=args.model,
+            tool_schema_ref=tool_schema_ref,
+            strip_tool_syntax=args.strip_tool_syntax,
         )
 
         # Write DR output

@@ -28,6 +28,7 @@ from src.schemas.trace import (
     InjectionCharSpan,
     ToolCall,
     ToolCallFunction,
+    RawMetadata,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -235,14 +236,98 @@ def convert_fujitsu_b4_record(
 # AgentDojo
 # =============================================================================
 
-def _parse_tool_calls(msg: Dict[str, Any]) -> Optional[List[ToolCall]]:
+def _detect_model_family(metadata: Dict[str, Any], messages: List[Dict[str, Any]]) -> Optional[str]:
+    """Detect model family from AgentDojo metadata or message patterns."""
+    # Check metadata for model info
+    model_name = metadata.get("model") or metadata.get("model_name") or ""
+    model_name_lower = model_name.lower()
+
+    if "llama" in model_name_lower:
+        return "llama"
+    if "claude" in model_name_lower or "anthropic" in model_name_lower:
+        return "claude"
+    if "gpt" in model_name_lower or "openai" in model_name_lower:
+        return "gpt"
+    if "gemini" in model_name_lower:
+        return "gemini"
+
+    # Check message content for format patterns
+    for msg in messages:
+        content = msg.get("content", "")
+        if "<|python_tag|>" in content:
+            return "llama"
+        if "<function_calls>" in content or "<function_calls>" in content:
+            return "claude"
+
+    return None
+
+
+def _detect_format_family(model_family: Optional[str], messages: List[Dict[str, Any]]) -> Optional[str]:
+    """Detect tool call format family from model family or message content."""
+    if model_family == "llama":
+        return "llama_python_tag"
+    if model_family == "claude":
+        return "anthropic_xml"
+    if model_family == "gpt":
+        return "openai_json"
+
+    # Fall back to content inspection
+    for msg in messages:
+        content = msg.get("content", "")
+        if "<|python_tag|>" in content:
+            return "llama_python_tag"
+        if "<function_calls>" in content:
+            return "anthropic_xml"
+
+    return "generic_json"
+
+
+def _parse_tool_calls(msg: Dict[str, Any], preserve_raw_content: bool = True, strip_tool_syntax: bool = False) -> Tuple[Optional[List[ToolCall]], Optional[str]]:
+    """
+    Parse tool calls from a message, preserving both structured and raw formats.
+
+    Args:
+        msg: Message dictionary potentially containing tool_calls
+        preserve_raw_content: If True, attempt to preserve the raw tool call string
+        strip_tool_syntax: If True, also return cleaned content with tool syntax stripped
+
+    Returns:
+        Tuple of (List of ToolCall objects or None, cleaned_content or None)
+        cleaned_content is only returned if strip_tool_syntax=True and tool calls found
+    """
     tool_calls = []
     raw_calls = msg.get("tool_calls")
     if raw_calls is None and msg.get("tool_call"):
         raw_calls = [msg.get("tool_call")]
 
     if not raw_calls:
-        return None
+        return None, None
+
+    # Extract clean content if strip_tool_syntax is enabled
+    cleaned_content = None
+    if strip_tool_syntax:
+        content = msg.get("content", "")
+        if content:
+            # Strip tool call syntax based on detected format
+            if "<|python_tag|>" in content:
+                # Llama format: take everything before <|python_tag|>
+                cleaned_content = content.split("<|python_tag|>", 1)[0].strip()
+            elif "<function_calls>" in content or "<invoke>" in content:
+                # Anthropic/Claude XML format
+                import re
+                cleaned_content = re.sub(r'<function_calls>.*?</function_calls>', '', content, flags=re.DOTALL)
+                cleaned_content = re.sub(r'<invoke>.*?</invoke>', '', cleaned_content, flags=re.DOTALL)
+                cleaned_content = cleaned_content.strip()
+            elif content.strip().startswith("{") and ('"name"' in content or '"function"' in content):
+                # OpenAI JSON format - if content is just JSON, clear it (tool call only)
+                try:
+                    json.loads(content)
+                    cleaned_content = ""  # Pure tool call, no reasoning
+                except json.JSONDecodeError:
+                    cleaned_content = content  # Keep as-is if not valid JSON
+            else:
+                # No tool syntax detected, keep as-is
+                cleaned_content = content
 
     for call in raw_calls:
         if not call:
@@ -251,24 +336,56 @@ def _parse_tool_calls(msg: Dict[str, Any]) -> Optional[List[ToolCall]]:
         if isinstance(func, str):
             func = {"name": func}
         name = func.get("name") or call.get("name") or ""
-        args = func.get("arguments") or call.get("args") or {}
-        if isinstance(args, str):
+
+        raw_args = func.get("arguments") or call.get("args")
+        args_obj = {}
+        args_json = None
+        raw_content = None
+
+        if isinstance(raw_args, str):
+            args_json = raw_args
             try:
-                args = json.loads(args)
+                args_obj = json.loads(raw_args)
             except json.JSONDecodeError:
-                args = {"raw": args}
+                args_obj = {"raw": raw_args}
+        elif isinstance(raw_args, dict):
+            args_obj = raw_args
+            # ALWAYS serialize dict to JSON for cross-model compatibility
+            # This ensures we can always re-render with any target model
+            args_json = json.dumps(args_obj, ensure_ascii=False)
+
+        # Preserve raw tool call content if available
+        if preserve_raw_content:
+            raw_content = call.get("raw_content") or call.get("raw") or func.get("raw_content")
 
         tool_calls.append(
             ToolCall(
                 call_id=call.get("id"),
-                function=ToolCallFunction(name=name, arguments=args),
+                function=ToolCallFunction(
+                    name=name,
+                    arguments=args_obj,
+                    arguments_json=args_json,
+                    raw_content=raw_content,
+                ),
             )
         )
 
-    return tool_calls or None
+    return tool_calls or None, cleaned_content
 
 
-def convert_agentdojo_record(record: Dict[str, Any], split: str, line_number: int) -> Optional[Trace]:
+def convert_agentdojo_record(record: Dict[str, Any], split: str, line_number: int, strip_tool_syntax: bool = False) -> Optional[Trace]:
+    """
+    Convert AgentDojo record to trace_v1 with full information preservation.
+
+    Preserves:
+    - Raw tool call arguments (arguments_json)
+    - Source model information (if available)
+    - Original assistant content (raw_assistant_content)
+    - All metadata fields (in raw_metadata)
+
+    Args:
+        strip_tool_syntax: If True, strip tool call syntax from assistant message content
+    """
     try:
         metadata = record.get("metadata", {})
         raw_messages = record.get("messages", [])
@@ -276,10 +393,18 @@ def convert_agentdojo_record(record: Dict[str, Any], split: str, line_number: in
         if not raw_messages:
             return None
 
+        # Detect model family and format from metadata/messages
+        model_family = _detect_model_family(metadata, raw_messages)
+        format_family = _detect_format_family(model_family, raw_messages)
+        model_id = metadata.get("model") or metadata.get("model_name")
+
+        # Capture raw assistant content for signal hints
+        raw_assistant_contents = []
+
         messages: List[Message] = []
         for msg in raw_messages:
             role = msg.get("role", "user")
-            tool_calls = _parse_tool_calls(msg)
+            tool_calls, cleaned_content = _parse_tool_calls(msg, preserve_raw_content=True, strip_tool_syntax=strip_tool_syntax)
             name = msg.get("name")
             if not name and role == "tool":
                 tool_call = msg.get("tool_call") or {}
@@ -291,10 +416,21 @@ def convert_agentdojo_record(record: Dict[str, Any], split: str, line_number: in
                         name = func.get("name")
             if role == "tool":
                 tool_calls = None
+
+            content = msg.get("content") or ""
+
+            # Use cleaned content if stripping was requested and we got a result
+            if strip_tool_syntax and cleaned_content is not None:
+                content = cleaned_content
+
+            # Capture raw assistant content (before stripping)
+            if role == "assistant":
+                raw_assistant_contents.append(msg.get("content") or "")
+
             messages.append(
                 Message(
                     role=role,
-                    content=msg.get("content") or "",
+                    content=content,
                     name=name,
                     tool_calls=tool_calls,
                     tool_call_id=msg.get("tool_call_id"),
@@ -305,10 +441,24 @@ def convert_agentdojo_record(record: Dict[str, Any], split: str, line_number: in
         is_attack = metadata.get("injection_task_id") is not None
         security_passed = bool(metadata.get("security", True))
         category = "harmful" if is_attack else "benign"
-        
+
         # Determine completeness based on messages
         completeness = _determine_completeness(messages)
         tier = _determine_tier(messages)
+
+        # Build signal hints with raw format preservation
+        signal_hints = SignalHints(
+            raw_format=format_family,
+            raw_assistant_content="\n".join(raw_assistant_contents) if raw_assistant_contents else None,
+        )
+
+        # Preserve all metadata fields in raw_metadata
+        raw_metadata = RawMetadata(
+            source_fields={
+                k: v for k, v in metadata.items()
+                if k not in {"suite_name", "name", "model", "model_name"}  # Already captured elsewhere
+            } if metadata else None,
+        )
 
         trace = Trace(
             id=Trace.generate_id("agentdojo", messages=messages),
@@ -323,7 +473,10 @@ def convert_agentdojo_record(record: Dict[str, Any], split: str, line_number: in
                     line_number,
                     ["index", "name", "user_task_id", "injection_task_id"],
                 ),
-                ingest_version="etl_a_v1",
+                ingest_version="etl_a_v2",  # Updated version for new format
+                model_id=model_id,
+                model_family=model_family,
+                format_family=format_family,
             ),
             messages=messages,
             split=split,
@@ -347,6 +500,8 @@ def convert_agentdojo_record(record: Dict[str, Any], split: str, line_number: in
                 ),
             ),
             links=TraceLinks(raw_id=metadata.get("name")),
+            signal_hints=signal_hints,
+            raw_metadata=raw_metadata if raw_metadata.source_fields else None,
         )
         return trace
     except Exception as exc:
@@ -422,6 +577,15 @@ def main() -> None:
              "Takes precedence over --system-prompt.",
     )
 
+    # Format-agnostic mode
+    parser.add_argument(
+        "--strip-tool-syntax",
+        action="store_true",
+        default=False,
+        help="Strip tool call syntax from assistant message content, storing only reasoning text. "
+             "Enables format-agnostic storage for cross-model training.",
+    )
+
     args = parser.parse_args()
 
     # Load system prompt from tool schema if provided
@@ -440,6 +604,9 @@ def main() -> None:
     from functools import partial
     fujitsu_b4_converter = partial(convert_fujitsu_b4_record, system_prompt=system_prompt)
 
+    # Bind strip_tool_syntax to AgentDojo converter
+    agentdojo_converter = partial(convert_agentdojo_record, strip_tool_syntax=args.strip_tool_syntax)
+
     if args.fujitsu_dir:
         for key, filename in FUJITSU_FILE_MAP.items():
             file_path = args.fujitsu_dir / filename
@@ -455,7 +622,7 @@ def main() -> None:
         inputs.append((args.fujitsu_b4, fujitsu_b4_converter, None))
 
     if args.agentdojo:
-        inputs.append((args.agentdojo, convert_agentdojo_record, args.agentdojo_limit))
+        inputs.append((args.agentdojo, agentdojo_converter, args.agentdojo_limit))
 
     if not inputs:
         parser.error("No input files provided. Use --fujitsu-dir, --fujitsu-b4, or --agentdojo.")

@@ -55,6 +55,62 @@ LLAMA_EOT = "<|eot_id|>"
 LLAMA_EOM = "<|eom_id|>"  # End of message - used for tool calls expecting response
 LLAMA_PYTHON_TAG = "<|python_tag|>"
 
+# Format family constants for cross-model rendering
+FORMAT_FAMILY_LLAMA = "llama_python_tag"
+FORMAT_FAMILY_OPENAI = "openai_json"
+FORMAT_FAMILY_ANTHROPIC = "anthropic_xml"
+FORMAT_FAMILY_GENERIC = "generic_json"
+
+
+def _detect_tokenizer_format_family(tokenizer) -> str:
+    """Detect the format family expected by a tokenizer."""
+    name = getattr(tokenizer, "name_or_path", "") or ""
+    name_lower = name.lower()
+
+    if "llama" in name_lower:
+        return FORMAT_FAMILY_LLAMA
+    if "gpt" in name_lower or "openai" in name_lower:
+        return FORMAT_FAMILY_OPENAI
+    if "claude" in name_lower or "anthropic" in name_lower:
+        return FORMAT_FAMILY_ANTHROPIC
+
+    # Check for Llama-specific tokens
+    try:
+        python_tag_id = tokenizer.convert_tokens_to_ids("<|python_tag|>")
+        if python_tag_id != tokenizer.unk_token_id:
+            return FORMAT_FAMILY_LLAMA
+    except Exception:
+        pass
+
+    return FORMAT_FAMILY_GENERIC
+
+
+def _should_preserve_formatting(
+    trace: Trace,
+    target_format: str,
+    preserve_formatting: bool,
+) -> bool:
+    """
+    Determine if we should use raw_content/arguments_json for exact replay.
+
+    Returns True if:
+    - preserve_formatting is True AND
+    - The trace's source format matches the target format
+    """
+    if not preserve_formatting:
+        return False
+
+    source_format = None
+    if trace.source:
+        source_format = trace.source.format_family
+    if not source_format and trace.signal_hints:
+        source_format = trace.signal_hints.raw_format
+
+    if not source_format:
+        return False
+
+    return source_format == target_format
+
 
 def _is_llama_tokenizer(tokenizer) -> bool:
     """Check if tokenizer is a Llama-style tokenizer that needs special tool call handling."""
@@ -81,6 +137,52 @@ def _format_llama31_header(role: str) -> str:
 def _format_tool_call_json(tool_name: str, arguments: Dict[str, Any]) -> str:
     """Format a tool call as Llama 3.1 JSON format."""
     return f'{LLAMA_PYTHON_TAG}{{"name": "{tool_name}", "parameters": {json.dumps(arguments, ensure_ascii=False)}}}'
+
+
+def _format_tool_call_with_raw(
+    tc,
+    target_format: str,
+    preserve_raw: bool,
+) -> str:
+    """
+    Format a tool call, optionally using raw_content for exact replay.
+
+    Args:
+        tc: ToolCall object
+        target_format: Target format family (e.g., FORMAT_FAMILY_LLAMA)
+        preserve_raw: If True and raw_content exists, use it
+
+    Returns:
+        Formatted tool call string
+    """
+    # If we have raw_content and want to preserve it, use it directly
+    if preserve_raw and tc.function.raw_content:
+        return tc.function.raw_content
+
+    # Otherwise, re-render using the target format
+    args = tc.function.arguments or {}
+
+    # If we have arguments_json, try to parse it for cleaner output
+    if tc.function.arguments_json:
+        try:
+            args = json.loads(tc.function.arguments_json)
+        except json.JSONDecodeError:
+            pass
+
+    if target_format == FORMAT_FAMILY_LLAMA:
+        return _format_tool_call_json(tc.function.name, args)
+    elif target_format == FORMAT_FAMILY_OPENAI:
+        # OpenAI-style JSON format
+        return json.dumps({
+            "name": tc.function.name,
+            "arguments": json.dumps(args, ensure_ascii=False),
+        }, ensure_ascii=False)
+    else:
+        # Generic JSON format
+        return json.dumps({
+            "name": tc.function.name,
+            "parameters": args,
+        }, ensure_ascii=False)
 
 
 # =============================================================================
@@ -816,44 +918,46 @@ def _apply_mwcs_weight_with_yaml(
 def _render_trace_llama31_manual(
     trace: Trace,
     add_generation_prompt: bool,
+    preserve_formatting: bool = False,
 ) -> str:
     """
     Manually render a trace in Llama 3.1 format with proper tool call handling.
-    
+
     Formats tool calls as:
         <|python_tag|>{"name": "...", "parameters": {...}}<|eom_id|>
-    
+
+    Args:
+        trace: The trace to render
+        add_generation_prompt: Whether to add generation prompt
+        preserve_formatting: If True and raw_content exists, use it for exact replay
+
     This is required because HuggingFace's apply_chat_template may not properly
     format tool calls for Llama 3.1 models.
     """
     parts = [LLAMA_BOS]
-    
+
     for msg in trace.messages:
         parts.append(_format_llama31_header(msg.role))
-        
+
         # Add content (may be empty for tool-call-only messages)
         if msg.content:
             parts.append(msg.content)
-        
+
         # Handle tool calls in assistant messages
         if msg.role == "assistant" and msg.tool_calls:
             for tc in msg.tool_calls:
-                # Get arguments
-                args = tc.function.arguments or {}
-                if tc.function.arguments_json:
-                    try:
-                        args = json.loads(tc.function.arguments_json)
-                    except json.JSONDecodeError:
-                        pass
-                
-                # Format the tool call
-                tool_call_str = _format_tool_call_json(tc.function.name, args)
-                
+                # Format the tool call, optionally using raw content
+                tool_call_str = _format_tool_call_with_raw(
+                    tc,
+                    target_format=FORMAT_FAMILY_LLAMA,
+                    preserve_raw=preserve_formatting,
+                )
+
                 # Add newline separator if there's content before tool call
                 if msg.content:
                     parts.append("\n\n")
                 parts.append(tool_call_str)
-            
+
             # Use <|eom_id|> for tool calls (expecting tool response)
             parts.append(LLAMA_EOM)
         elif msg.role == "tool":
@@ -862,7 +966,7 @@ def _render_trace_llama31_manual(
         else:
             # Regular messages use <|eot_id|>
             parts.append(LLAMA_EOT)
-    
+
     # Add generation prompt if requested
     if add_generation_prompt:
         parts.append(_format_llama31_header("assistant"))
@@ -886,8 +990,32 @@ def render_trace(
     include_rendered_text: bool,
     chat_template: Optional[str] = None,
     force_llama_format: bool = False,
+    preserve_formatting: bool = False,
 ) -> RenderedView:
+    """
+    Render a trace for a specific tokenizer.
+
+    Args:
+        trace: The trace to render
+        tokenizer: Target tokenizer
+        max_length: Max sequence length
+        add_generation_prompt: Whether to add generation prompt
+        include_rendered_text: Whether to include rendered text in output
+        chat_template: Optional custom chat template
+        force_llama_format: Force Llama 3.1 format
+        preserve_formatting: If True, use raw_content for exact replay when
+                           the source format matches the target format
+
+    Returns:
+        RenderedView with tokenized trace
+    """
     chat_messages = _trace_to_chat_messages(trace)
+
+    # Detect target format family
+    target_format = _detect_tokenizer_format_family(tokenizer)
+
+    # Determine if we should preserve raw formatting
+    should_preserve = _should_preserve_formatting(trace, target_format, preserve_formatting)
 
     # Use manual Llama 3.1 rendering for tool calls when using a Llama tokenizer
     # This ensures proper <|python_tag|>{"name": "...", "parameters": {...}}<|eom_id|> format
@@ -896,9 +1024,11 @@ def render_trace(
         and _trace_has_tool_calls(trace)
         and chat_template is None  # Only use manual if no custom template provided
     )
-    
+
     if use_manual_llama_rendering:
-        rendered_text = _render_trace_llama31_manual(trace, add_generation_prompt)
+        rendered_text = _render_trace_llama31_manual(
+            trace, add_generation_prompt, preserve_formatting=should_preserve
+        )
     else:
         rendered_text = tokenizer.apply_chat_template(
             chat_messages,
@@ -1015,6 +1145,13 @@ def main() -> None:
         action="store_true",
         help="Force Llama 3.1 tool call format (<|python_tag|>{...}<|eom_id|>) even for non-Llama tokenizers"
     )
+    parser.add_argument(
+        "--preserve-formatting",
+        action="store_true",
+        help="Preserve raw tool call formatting when source format matches target. "
+             "Use for same-model replay (high fidelity). Without this flag (default), "
+             "tool calls are re-rendered for the target model (cross-model compatible)."
+    )
 
     args = parser.parse_args()
 
@@ -1065,6 +1202,7 @@ def main() -> None:
             include_rendered_text=args.include_rendered_text,
             chat_template=chat_template,
             force_llama_format=args.force_llama_format,
+            preserve_formatting=args.preserve_formatting,
         )
 
         # For skeleton traces with --allow-skeleton, override to skeleton_policy
