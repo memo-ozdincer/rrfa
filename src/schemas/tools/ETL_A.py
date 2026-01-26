@@ -135,19 +135,38 @@ def _coerce_bool(value: Any, default: bool = True) -> bool:
 # Fujitsu B4 (Orchestrator Tool-Flip)
 # =============================================================================
 
-def convert_fujitsu_b4_record(record: Dict[str, Any], split: str, line_number: int) -> Optional[Trace]:
+def convert_fujitsu_b4_record(
+    record: Dict[str, Any],
+    split: str,
+    line_number: int,
+    system_prompt: Optional[str] = None,
+) -> Optional[Trace]:
     """
     Convert Fujitsu B4 (orchestrator tool-flip) record to trace_v1.
-    
+
     B4 records are SKELETON traces (no assistant response) that need
     generation via generate_completions.py before they can be used for training.
+
+    Args:
+        record: Raw Fujitsu B4 record
+        split: Data split (train/eval/test)
+        line_number: Line number in source file
+        system_prompt: System prompt to use. If None, a placeholder is used.
+                      The actual system prompt should be provided at generation time
+                      via generate_completions.py --tool-schema.
     """
+    # Default to a placeholder that indicates the system prompt should be overridden
+    # at generation time. generate_completions.py will replace this with the
+    # system prompt from the tool schema.
+    if system_prompt is None:
+        system_prompt = "[PLACEHOLDER: System prompt will be provided from tool schema at generation time]"
+
     try:
         user_content = record.get("combined_query") or record.get("benign_query") or ""
         messages = [
             Message(
                 role="system",
-                content="You are a helpful assistant with access to internal documents and web search.",
+                content=system_prompt,
             ),
             Message(
                 role="user",
@@ -364,6 +383,17 @@ def _write_converted(
 # CLI
 # =============================================================================
 
+def _load_system_prompt_from_schema(schema_path: Path) -> Optional[str]:
+    """Load system prompt from a tool schema JSON file."""
+    try:
+        with open(schema_path, "r") as f:
+            schema = json.load(f)
+        return schema.get("system_prompt")
+    except Exception as e:
+        logger.warning("Failed to load system prompt from %s: %s", schema_path, e)
+        return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Convert raw Tier A data to trace_v1")
 
@@ -376,23 +406,53 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True, help="Output JSONL file for trace_v1")
     parser.add_argument("--split", default="train", help="Split assignment")
 
+    # System prompt options (for datasets that don't include one, like Fujitsu B4)
+    parser.add_argument(
+        "--system-prompt",
+        type=str,
+        default=None,
+        help="System prompt to use for datasets that don't include one (e.g., Fujitsu B4). "
+             "If not provided, a placeholder will be used that should be overridden at generation time.",
+    )
+    parser.add_argument(
+        "--tool-schema",
+        type=Path,
+        default=None,
+        help="Path to tool schema JSON file to extract system_prompt from. "
+             "Takes precedence over --system-prompt.",
+    )
+
     args = parser.parse_args()
 
+    # Load system prompt from tool schema if provided
+    system_prompt = args.system_prompt
+    if args.tool_schema:
+        schema_prompt = _load_system_prompt_from_schema(args.tool_schema)
+        if schema_prompt:
+            system_prompt = schema_prompt
+            logger.info("Loaded system prompt from %s", args.tool_schema)
+        else:
+            logger.warning("No system_prompt found in %s, using default", args.tool_schema)
+
     inputs: List[Tuple[Path, Any, Optional[int]]] = []
+
+    # Use functools.partial to bind system_prompt to Fujitsu B4 converter
+    from functools import partial
+    fujitsu_b4_converter = partial(convert_fujitsu_b4_record, system_prompt=system_prompt)
 
     if args.fujitsu_dir:
         for key, filename in FUJITSU_FILE_MAP.items():
             file_path = args.fujitsu_dir / filename
             if file_path.exists():
                 converter = {
-                    "b4": convert_fujitsu_b4_record,
+                    "b4": fujitsu_b4_converter,
                 }[key]
                 inputs.append((file_path, converter, None))
             else:
                 logger.warning("Missing Fujitsu file: %s", file_path)
 
     if args.fujitsu_b4:
-        inputs.append((args.fujitsu_b4, convert_fujitsu_b4_record, None))
+        inputs.append((args.fujitsu_b4, fujitsu_b4_converter, None))
 
     if args.agentdojo:
         inputs.append((args.agentdojo, convert_agentdojo_record, args.agentdojo_limit))

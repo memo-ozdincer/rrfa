@@ -524,6 +524,7 @@ def build_ds_from_skeletons(
     n_no_tool: int = 5,
     n_other_tool: int = 5,
     n_format_errors: int = 5,
+    debug: bool = False,  # DEBUG FLAG
 ) -> Tuple[List[Trace], Dict[str, Any]]:
     """
     Build DS (successful flips) from skeleton traces.
@@ -555,6 +556,10 @@ def build_ds_from_skeletons(
         "format_errors": 0,
     }
 
+    # DEBUG: Track first few for detailed logging
+    debug_count = 0
+    debug_limit = 10 if debug else 0
+
     examples = {
         "successful_flips": [],
         "correct_behavior": [],
@@ -583,13 +588,33 @@ def build_ds_from_skeletons(
             expected_tool = expected_tool or trace.signal_hints.expected_tool_name
             simulated_tool = simulated_tool or trace.signal_hints.observed_tool_name
 
+        # DEBUG: Print extraction details
+        if debug and debug_count < debug_limit:
+            logger.info(f"[DEBUG DS] Trace {trace.id[:40]}...")
+            logger.info(f"  tool_attack.expected_tool: {trace.tool_attack.expected_tool if trace.tool_attack else None}")
+            logger.info(f"  tool_attack.observed_tool (=simulated): {trace.tool_attack.observed_tool if trace.tool_attack else None}")
+            logger.info(f"  signal_hints.expected_tool_name: {trace.signal_hints.expected_tool_name if trace.signal_hints else None}")
+            logger.info(f"  signal_hints.observed_tool_name: {trace.signal_hints.observed_tool_name if trace.signal_hints else None}")
+            logger.info(f"  -> Resolved expected_tool: {expected_tool}")
+            logger.info(f"  -> Resolved simulated_tool: {simulated_tool}")
+
         # Build messages from trace
+        # NOTE: Override system message with the one from tool schema to match old pipeline behavior.
+        # ETL_A uses a hardcoded system prompt that doesn't describe the tools, which can cause
+        # the model to make different tool choices.
         messages = []
         for msg in trace.messages:
-            messages.append({
-                "role": msg.role,
-                "content": msg.content,
-            })
+            if msg.role == "system":
+                # Use the system prompt from the tool schema instead of ETL_A's hardcoded one
+                messages.append({
+                    "role": "system",
+                    "content": system_prompt,
+                })
+            else:
+                messages.append({
+                    "role": msg.role,
+                    "content": msg.content,
+                })
 
         # Generate response
         if isinstance(backend, VLLMBackend):
@@ -610,6 +635,13 @@ def build_ds_from_skeletons(
         tool_call = extract_tool_call(response)
         observed_tool = tool_call["name"] if tool_call else None
 
+        # DEBUG: Print extracted tool and comparison
+        if debug and debug_count < debug_limit:
+            logger.info(f"  Model response (first 200 chars): {response[:200]}...")
+            logger.info(f"  -> Extracted observed_tool: {observed_tool}")
+            logger.info(f"  Comparison: observed({observed_tool}) == simulated({simulated_tool}) ? {observed_tool == simulated_tool}")
+            logger.info(f"  Comparison: observed({observed_tool}) == expected({expected_tool}) ? {observed_tool == expected_tool}")
+
         # Determine outcome (matching generate_ds.py logic)
         if observed_tool is None:
             stats["no_tool_call"] += 1
@@ -627,6 +659,11 @@ def build_ds_from_skeletons(
             stats["other_tool"] += 1
             is_flip_success = False
             category = "other_tool"
+
+        # DEBUG: Print final category
+        if debug and debug_count < debug_limit:
+            logger.info(f"  -> Category: {category}, is_flip_success: {is_flip_success}")
+            debug_count += 1
 
         # Validate format
         is_valid, format_error = validate_llama_format(response)
@@ -748,6 +785,7 @@ def build_dr_from_ds(
     n_wrong_tool: int = 5,
     n_no_tool: int = 5,
     n_format_errors: int = 5,
+    debug: bool = False,  # DEBUG FLAG
 ) -> Tuple[List[Trace], Dict[str, Any]]:
     """
     Build DR (paired benign twins) from DS traces.
@@ -786,6 +824,10 @@ def build_dr_from_ds(
         "format_errors": [],
     } if collect_examples else None
 
+    # DEBUG: Track first few for detailed logging
+    debug_count = 0
+    debug_limit = 10 if debug else 0
+
     iterator = tqdm(ds_traces, desc="Building DR") if verbose else ds_traces
 
     for ds_trace in iterator:
@@ -803,21 +845,47 @@ def build_dr_from_ds(
         if ds_trace.tool_attack:
             injection_text = ds_trace.tool_attack.injection_text
 
+        # DEBUG: Print input DS trace details
+        if debug and debug_count < debug_limit:
+            logger.info(f"[DEBUG DR] DS Trace {ds_trace.id[:40]}...")
+            logger.info(f"  tool_attack.expected_tool: {ds_trace.tool_attack.expected_tool if ds_trace.tool_attack else None}")
+            logger.info(f"  tool_attack.observed_tool (=simulated in DS): {ds_trace.tool_attack.observed_tool if ds_trace.tool_attack else None}")
+            logger.info(f"  -> Resolved expected_tool for DR: {expected_tool}")
+            logger.info(f"  injection_text (first 80 chars): {injection_text[:80] if injection_text else None}...")
+
         # Build messages with injection removed
+        # NOTE: Override system message with the one from tool schema to match old pipeline behavior
         messages = []
+        original_user_content = None
         for msg in ds_trace.messages:
             # Skip assistant messages (we're regenerating)
             if msg.role == "assistant":
                 continue
 
-            content = msg.content
-            if msg.role == "user":
-                content = remove_injection_from_content(content, injection_text)
+            if msg.role == "system":
+                # Use the system prompt from the tool schema instead of ETL_A's hardcoded one
+                messages.append({
+                    "role": "system",
+                    "content": system_prompt,
+                })
+            elif msg.role == "user":
+                original_user_content = msg.content
+                content = remove_injection_from_content(msg.content, injection_text)
+                messages.append({
+                    "role": "user",
+                    "content": content,
+                })
+            else:
+                messages.append({
+                    "role": msg.role,
+                    "content": msg.content,
+                })
 
-            messages.append({
-                "role": msg.role,
-                "content": content,
-            })
+        # DEBUG: Print cleaned user content
+        if debug and debug_count < debug_limit:
+            cleaned_user = next((m["content"] for m in messages if m["role"] == "user"), None)
+            logger.info(f"  Original user content (first 100): {original_user_content[:100] if original_user_content else None}...")
+            logger.info(f"  Cleaned user content (first 100): {cleaned_user[:100] if cleaned_user else None}...")
 
         # Generate response
         if isinstance(backend, VLLMBackend):
@@ -838,6 +906,12 @@ def build_dr_from_ds(
         tool_call = extract_tool_call(response)
         observed_tool = tool_call["name"] if tool_call else None
 
+        # DEBUG: Print extracted tool and comparison
+        if debug and debug_count < debug_limit:
+            logger.info(f"  Model response (first 200 chars): {response[:200]}...")
+            logger.info(f"  -> Extracted observed_tool: {observed_tool}")
+            logger.info(f"  Comparison: observed({observed_tool}) == expected({expected_tool}) ? {observed_tool == expected_tool}")
+
         # Determine outcome (matching generate_dr.py logic)
         if observed_tool is None:
             stats["no_tool_call"] += 1
@@ -851,6 +925,11 @@ def build_dr_from_ds(
             stats["wrong_tool"] += 1
             is_correct = False
             category = "wrong_tool"
+
+        # DEBUG: Print final category
+        if debug and debug_count < debug_limit:
+            logger.info(f"  -> Category: {category}, is_correct: {is_correct}")
+            debug_count += 1
 
         # Validate format
         is_valid, format_error = validate_llama_format(response)
@@ -1177,6 +1256,11 @@ def main():
         default=5,
         help="Number of format error examples to collect (default: 5)",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug logging for first N samples (shows field values and comparisons)",
+    )
 
     args = parser.parse_args()
 
@@ -1235,6 +1319,7 @@ def main():
             n_no_tool=args.n_no_tool,
             n_other_tool=args.n_other_tool,
             n_format_errors=args.n_format_errors,
+            debug=args.debug,
         )
 
         # Write DS output
@@ -1279,6 +1364,7 @@ def main():
             n_wrong_tool=args.n_wrong_tool,
             n_no_tool=args.n_no_tool,
             n_format_errors=args.n_format_errors,
+            debug=args.debug,
         )
 
         # Write DR output

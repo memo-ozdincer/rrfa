@@ -38,7 +38,8 @@ import os
 import re
 
 # CRITICAL FIX: Ensure HOME is redirected to cache directory
-cache_root = "/scratch/memoozd/cb-scratch/cache"
+# Use CACHE_ROOT environment variable if set, otherwise use a sensible default
+cache_root = os.environ.get("CACHE_ROOT", "/scratch/memoozd/cb-scratch/cache")
 
 if os.path.exists(cache_root):
     os.environ["HOME"] = cache_root
